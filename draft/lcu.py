@@ -817,7 +817,7 @@ def fetch_session(timeout: float = 2.0) -> DraftState:
                 "GameStart": "игра уже началась",
             }.get(phase, f"фаза клиента: {phase or 'неизвестна'}")
             raise LcuUnavailable(
-                f"Сейчас не драфт ({hint}). Поддерживаются рангед,обычная и "
+                f"Сейчас не драфт ({hint}). Поддерживаются ранкед,обычная и "
                 "ARAM — на экране подбора ботов в тренировочном режиме "
                 "состав через LCU недоступен.") from e
         raise LcuUnavailable(f"LCU ответил {e.code}") from e

@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from ctypes import wintypes
+from pathlib import Path
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
@@ -48,11 +50,21 @@ NIF_INFO = 0x10
 IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE = 1, 0x10, 0x40
 WM_APP = 0x8000
 WM_TRAY = WM_APP + 1
-WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK = 0x111, 0x02, 0x203
+WM_COMMAND, WM_DESTROY = 0x111, 0x02
+WM_LBUTTONUP, WM_RBUTTONUP = 0x0202, 0x0205
 
 TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0002, 0x0100
 MENU_RESTORE, MENU_QUIT = 40001, 40002
 LOADICON = None  # прототип LoadIconW задаётся в _icon_handle
+
+load_image = user32.LoadImageW
+load_image.restype = wintypes.HANDLE
+load_image.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                       ctypes.c_int, ctypes.c_int, wintypes.UINT]
+
+destroy_icon = user32.DestroyIcon
+destroy_icon.restype = wintypes.BOOL
+destroy_icon.argtypes = [wintypes.HANDLE]
 
 
 class GUID(ctypes.Structure):
@@ -85,22 +97,40 @@ class _NOTIFYICONDATA(ctypes.Structure):
     ]
 
 
-def _icon_handle():
-    """Системная иконка приложения вместо своей картинки.
+def _icon_path() -> Path | None:
+    """Где лежит icon.ico: в пакете PyInstaller или в корне проекта."""
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        root = Path(meipass) if meipass else \
+            Path(__file__).resolve().parent.parent
+        p = root / "icon.ico"
+        return p if p.is_file() else None
+    except Exception:                         # noqa: BLE001
+        return None
 
-    Свою иконку в .exe мы не встраиваем, а иконка Windows есть всегда и не
-    требует файла на диске. IDI_APPLICATION передаётся как MAKEINTRESOURCE —
-    это обычный «адрес-число», поэтому первый аргумент у LoadIconW тоже
-    должен быть указателем, а не int.
+
+def _icon_handle():
+    """(hIcon, owned): своя иконка из icon.ico или системная запасная.
+
+    Раньше в трее висела системная иконка приложения Windows, которую в трее
+    не разобрать. Свою иконку из .ico подтягиваем через LoadImageW, как
+    делает сам шелл; если файла нет (например, запуск из исходников без
+    генерации) — остаёмся на системной. owned=True значит, что HICON создана
+    нами через LoadImageW и её надо DestroyIcon в stop().
     """
+    p = _icon_path()
+    if p:
+        h = load_image(None, str(p), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        if h:
+            return h, True
     load = user32.LoadIconW
     load.restype = wintypes.HANDLE
     load.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     for res in (32512, 43, 13):        # приложение, приложение, папка
         h = load(None, ctypes.c_void_p(res))
         if h:
-            return h
-    return None
+            return h, False
+    return None, False
 
 
 def surface_existing(title: str) -> bool:
@@ -131,8 +161,9 @@ class TrayIcon:
 
     WNDCLASS_NAME = "LoLDraftAssistantTray"
 
-    def __init__(self, tip: str, on_restore, on_quit):
+    def __init__(self, tip: str, on_restore, on_settings, on_quit):
         self.on_restore = on_restore
+        self.on_settings = on_settings
         self.on_quit = on_quit
         self.tip_text = tip
         self.class_name = f"{self.WNDCLASS_NAME}{id(self)}"
@@ -142,12 +173,17 @@ class TrayIcon:
         self._added = False
         self._old_wndproc = None
         self._proc_ref = None
+        self._icon_owned = False
+        self._icon_handle = None
 
     # ---------- окно ----------
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
-            if lparam == WM_LBUTTONDBLCLK:
-                self.on_restore()
+            # Левый клик — самое интуитивное: открываем настройки. Двойные
+            # клики не различаем: вторая команда просто поднимет уже
+            # открытое окно настроек (единственный экземпляр).
+            if lparam == WM_LBUTTONUP:
+                self.on_settings()
             elif lparam == WM_RBUTTONUP or lparam == WM_COMMAND:
                 self._popup(hwnd)
             return 0
@@ -209,7 +245,8 @@ class TrayIcon:
         nid.uID = 1
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAY
-        nid.hIcon = _icon_handle()
+        self._icon_handle, self._icon_owned = _icon_handle()
+        nid.hIcon = self._icon_handle
         nid.szTip = self.tip_text
         self._nid = nid
         if shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
@@ -232,6 +269,10 @@ class TrayIcon:
 
     def stop(self) -> None:
         self._remove()
+        if self._icon_owned and self._icon_handle:
+            destroy_icon(self._icon_handle)
+            self._icon_handle = None
+            self._icon_owned = False
         if _ACTIVE.get("tray") is self:
             _ACTIVE["tray"] = None
         if self._hwnd:

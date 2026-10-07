@@ -150,8 +150,13 @@ class DraftOverlay:
                                                          w is
                                                          self.btn_settings
                                                          else TONE_LOW))
-            # клик по кнопке не должен ещё и тянуть окно
+            # клик по кнопке не должен ещё и тянуть окно: ButtonPress
+            # отдаём "break" (прерывает перетаскивание оверлея), а команду
+            # вешаем на отпускание — ButtonPress и Button-1 это одно событие.
             b.bind("<ButtonPress-1>", lambda e: "break")
+        self.btn_settings.bind("<ButtonRelease-1>",
+                               lambda e: self.open_settings())
+        self.btn_close.bind("<ButtonRelease-1>", lambda e: self.quit())
 
         self.body = tk.Frame(self.root, bg=BG)
         self.body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
@@ -411,6 +416,10 @@ class DraftOverlay:
             tk.Label(self.body, text="вне пула", bg=BG, fg=ACCENT,
                      font=("Segoe UI", 9, "bold")).pack(anchor="w",
                                                         padx=6, pady=(6, 0))
+            if not any(p.data_ok for p in offs):
+                tk.Label(self.body, text="пока по мете роли — враги не видны",
+                         bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(
+                             anchor="w", padx=6)
             for i, p in enumerate(offs, 1):
                 self._render_row(i, p)
         self._render_footer(extra)
@@ -654,6 +663,32 @@ class DraftOverlay:
             entries = entries + [boots]
         for n, it in enumerate(entries, 1):
             self._render_item(line, it, last=boots is not None and n == len(entries))
+
+        notes = build.get("situational") or []
+        if notes:
+            tag_txt = {
+                "anti_heal": "антихил против",
+                "anti_shield": "щиты против",
+                "vs_ap": "магический состав",
+                "vs_ad": "физ. состав",
+            }
+            sub = tk.Frame(self.body, bg=BG)
+            sub.pack(fill="x", pady=(0, 2))
+            tk.Label(sub, text="под драфт ▸", bg=BG, fg=ACCENT,
+                     font=("Segoe UI", 8, "bold")).pack(side="left",
+                                                        padx=(6, 0))
+            first = True
+            for note in notes:
+                head = tag_txt.get(note.get("tag"), note.get("tag", ""))
+                if not first:
+                    tk.Label(sub, text=" ‖ ", bg=BG, fg=MUTED,
+                             font=("Segoe UI", 8)).pack(side="left")
+                tk.Label(sub, text=f"{head}: {note.get('why', '')}",
+                         bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(
+                             side="left")
+                tk.Label(sub, text=f"→ {note.get('item', '')}", bg=BG,
+                         fg=TONE_HIGH, font=("Segoe UI", 8)).pack(side="left")
+                first = False
 
     def _render_item(self, parent, item: dict, last: bool = False) -> None:
         iid = item.get("item_id") or 0

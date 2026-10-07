@@ -377,7 +377,17 @@ def top_off_pool(pool: list, draft, champs: dict, cache, config,
     if not candidates:
         return []
     picks = evaluate(candidates, draft, champs, cache, config, role=role)
-    out = [p for p in picks if p.data_ok
-           and p.cid not in pool_ids and p.cid not in taken
+    out = [p for p in picks
+           if p.cid not in pool_ids and p.cid not in taken
            and not p.banned_by_enemy and not p.banned_by_ally]
+    # Раньше data_ok выкидывал кандидатов без матчапов на ТЕКУЩИХ врагов, и
+    # блок «вне пула» молчал до полного формирования драфта — ровно когда
+    # совет уже ни на что не влияет. Кандидату не нужны пикнутые враги: у
+    # него уже есть data роли (фильтр counter_role выше). Пока врагов не
+    # видно, ранжируем по винрейту роли в мете — блок полезен уже с банов.
+    meta = {p.cid: (cache.champ_meta(p.cid, role).get("win_rate") or 0.0)
+            for p in out}
+    out.sort(key=lambda p: (0 if p.data_ok else 1,
+                            -(p.est_winrate if p.data_ok
+                              else meta.get(p.cid, 0.0))))
     return out[:limit]

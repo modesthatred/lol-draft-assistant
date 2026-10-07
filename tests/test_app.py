@@ -1316,6 +1316,14 @@ def test_top_off_pool_and_cache_marker() -> None:
     check("вне пула: забаненный врагами исключён",
           "Karthus" not in n3, str(n3))
 
+    # враги ещё не пикнуты (фаза банов): блок обязан быть живым — это был
+    # главный прокол, когда он молчал до полного формирования драфта
+    early = DraftState.from_ids()
+    ne = [p.name for p in top_off_pool(pool, early, champs, cache, config,
+                                       role="jungle")]
+    check("вне пула: блок живой до пиков врагов (по мете)",
+          len(ne) == 3, str(ne))
+
     am = Path(tempfile.gettempdir()) / "opencode" / "allmeta_test.db"
     if am.is_file():
         am.unlink()

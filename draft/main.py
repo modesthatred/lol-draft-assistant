@@ -185,7 +185,7 @@ def build_for_pick(draft, cache, config, champs) -> dict | None:
                 "url": DD_ITEM.format(v=patch, i=iid) if iid else ""}
 
     champ = champs.get(cid) if isinstance(champs, dict) else None
-    return {
+    build = {
         "cid": cid,
         "name": getattr(champ, "name", "") or f"чемпион #{cid}",
         "locked": bool(getattr(draft, "my_champion_locked", False)),
@@ -194,6 +194,14 @@ def build_for_pick(draft, cache, config, champs) -> dict | None:
         "items": [entry(r) for r in items],
         "boots": entry(boots) if boots else None,
     }
+    # Ситуативные предметы под видимых врагов: оп.гг-порядок не трогаем, но
+    # подсказка «антихил/щиты/МР/армор» должна быть привязана к драфту, а не
+    # висеть статично при каждом пике.
+    enemies = getattr(draft, "enemies", None)
+    if enemies and isinstance(champs, dict):
+        from .situational import situational
+        build["situational"] = situational(enemies, champs)
+    return build
 
 
 def render_header(draft, config, n, role: str = "") -> str:
@@ -487,8 +495,10 @@ class App:
 
                 self.do_sync(force=True, progress=progress)
                 log.info("auto-sync finished")
+                summary = self.last_sync_summary or ""
                 if on_status:
-                    on_status("статистика обновлена")
+                    on_status("статистика обновлена: " + summary
+                              if summary else "статистика обновлена")
             except Exception as e:                # noqa: BLE001
                 log.exception("auto-sync failed")
                 if on_status:
@@ -759,8 +769,13 @@ class App:
         # on_refresh назначаем ниже: замыкания должны быть определены раньше,
         # чем оверлей начнёт по ним обращаться.
         overlay = DraftOverlay(self.config)
+        # Пока на экране стартовый итог синка, автопрятание через пару секунд
+        # законно. Любое действие (F8, трей, появление драфта) снимает флаг —
+        # и окно остаётся, где пользователь его хочет.
+        self._startup_hold = False
 
         def refresh():
+            self._startup_hold = False
             t0 = time.time()
             trace.event("hotkey", hotkey=self.config.hotkey)
             result, err = self.evaluate_now()
@@ -773,6 +788,9 @@ class App:
                 if any(t in s for t in transient):
                     overlay.show()
                     return
+                # «нет драфта» — не повод прятать окно: иначе жмыханье F8
+                # выглядит мёртвым. Показываем оверлей и самой ошибкой.
+                overlay.show()
                 overlay.post_error(f"Нет драфта: {err}")
                 return
             picks, draft = result
@@ -821,6 +839,8 @@ class App:
                                  self.current_status(),
                                  self.pool_for(role), self.cache)
             extra["footer"] = self._footer_data(role)
+            # драфт есть — стартовый итог больше не актуален, не прячем
+            self._startup_hold = False
             overlay.post(picks,
                          render_header(draft, self.config, self.champs,
                                        role),
@@ -828,11 +848,26 @@ class App:
                                         self.champs),
                          extra)
 
+        settings_wnd = {"w": None}
+
         def open_settings():
+            # один экземпляр: левый клик по трею / ⚙ несколько раз подряд
+            # не должны штабелировать окна. Повторный вызов поднимает уже
+            # открытое окно.
             from .settings_ui import SettingsWindow
 
-            SettingsWindow(overlay.root, self.config, self.cache,
-                           self.champs, on_save=self.apply_settings)
+            w = settings_wnd["w"]
+            if w is not None:
+                try:
+                    if w.top.winfo_exists():
+                        w.top.lift()
+                        w.top.focus_force()
+                        return
+                except Exception:                   # noqa: BLE001
+                    pass
+            w = SettingsWindow(overlay.root, self.config, self.cache,
+                               self.champs, on_save=self.apply_settings)
+            settings_wnd["w"] = w
 
         quitting = {"v": False}
 
@@ -903,17 +938,33 @@ class App:
         # синк идёт в отдельном потоке, а трогать Tk можно только из
         # главного — возвращаемся в него через after()
         def after_startup_sync():
-            """Окно показывали только ради видимости стартового синка.
+            """Стартовый синк дошёл до конца — показываем ИТОГ, а не молчим.
 
-            Драфта ещё нет, а висящий прямоугольник посреди экрана — шум,
-            поэтому прячем его, как только фон доработал. Драфт идёт —
-            оставляем и заодно перерисовываем свежими данными.
+            Раньше окно после синка исчезало молча, и было непонятно, что
+            вообще обновилось. Теперь на пару секунд остаётся строка
+            «статистика обновлена: обновлено: 4, патч: 16.20.1», и только
+            потом оно само убирается — если пользователь не вмешался и драфт
+            не начался (это снимает флаг _startup_hold).
             """
             try:
                 fetch_session()
             except LcuUnavailable:
-                overlay.hide()
-            refresh()
+                draft_ok = False
+            else:
+                draft_ok = True
+            summary = self.last_sync_summary or ""
+            overlay.post_status(
+                f"статистика обновлена: {summary}" if summary
+                else "статистика обновлена")
+            if draft_ok:
+                # драфт уже идёт — рисуем состав, прятать нечего
+                refresh()
+                return
+            self._startup_hold = True
+            overlay.root.after(
+                3500,
+                lambda: (self._startup_hold and not overlay.dead) and
+                overlay.hide() or None)
 
         def sync_then_refresh():
             self._force_sync = force_sync
@@ -935,7 +986,10 @@ class App:
             from .version import APP_NAME, VERSION
 
             tray = TrayIcon(f"{APP_NAME} {VERSION}",
-                            on_restore=lambda: overlay.show(),
+                            on_restore=lambda: (
+                                setattr(self, "_startup_hold", False),
+                                overlay.show())[1],
+                            on_settings=open_settings,
                             on_quit=quit_app)
             if tray.start():
                 self.tray = tray
