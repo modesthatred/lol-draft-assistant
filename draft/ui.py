@@ -593,11 +593,17 @@ class DraftOverlay:
             running = bool(footer.get("running"))
             fresh = bool(data_patch != "—" and data_patch == league_patch)
             stage = footer.get("stage") or "обновляю статистику…"
+            if stage.strip() and footer.get("net") is not False:
+                stage = "⬇ OP.GG · " + stage
             try:
                 done, total = int(footer.get("done") or 0), \
                     int(footer.get("total") or 0)
             except (TypeError, ValueError):
                 done = total = 0
+            try:
+                eta = int(footer.get("eta") or 0)
+            except (TypeError, ValueError):
+                eta = 0
 
             bar = tk.Frame(self.body, bg=BG)
             bar.pack(fill="x", pady=(4, 0))
@@ -636,7 +642,13 @@ class DraftOverlay:
                                        length=max(160, self._wrap() - 20))
                 pbar.pack(fill="x", pady=(2, 0))
                 if total:
-                    tk.Label(bar, text=f"{done}/{total}", bg=BG, fg=MUTED,
+                    right = f"{done}/{total}"
+                    if running and eta:
+                        if eta >= 60:
+                            right += f" · осталось ≈{eta // 60}:{eta % 60:02d}"
+                        else:
+                            right += f" · осталось ≈{eta} сек"
+                    tk.Label(bar, text=right, bg=BG, fg=MUTED,
                              font=("Segoe UI", 7)).pack(anchor="e")
 
         tk.Label(self.body, text=f"v{VERSION}", bg=BG, fg="#4a5262",

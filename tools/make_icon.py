@@ -1,4 +1,4 @@
-"""Генератор иконки приложения — бумажный воздушный фонарь (sky lantern).
+"""Генератор иконки приложения — красный бумажный фонарь (как 🏮).
 
 Ноль зависимостей: рисуем пиксели чистой математикой, пакуем в PNG через
 zlib/struct, оборачиваем в ICO (PNG-записи поддерживаются Windows с Vista).
@@ -27,160 +27,201 @@ def clamp01(v: float) -> float:
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
 
-def skylamp(size: int) -> bytearray:
-    """RGBA-буфер `size`x`size` с воздушным фонарём и тёплым ореолом."""
+def lerp(a: tuple, b: tuple, t: float) -> tuple:
+    t = clamp01(t)
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+GOLD = (246, 196, 83)
+GOLD_CAP = (252, 211, 120)
+PAPER_TOP = (192, 54, 46)
+PAPER_BOT = (110, 22, 18)
+
+
+def red_lantern(size: int) -> bytearray:
+    """RGBA-буфер `size`x`size` с красным бумажным фонарём и тёплым ореолом.
+
+    Корпус — вертикальный эллипс из тёмно-красной бумаги, по нему золотые
+    меридианы-рёбра и горизонтальное кольцо; сверху золотой колпачок, снизу
+    кольцо с тёмным устьем и маленькая кисточка.
+    """
     n = size
     buf = bytearray(n * n * 4)
 
     xc = n / 2
-    ytop = 0.09 * n
-    h = 0.84 * n
+    ytop = 0.16 * n
+    h = 0.64 * n
+    ybot = ytop + h
     w = 0.315 * n
-    gc = ytop + h / 2                       # центр ореола
+    gc = ytop + h / 2
 
     def p_of(y: float) -> float:
-        return max(0.0, min(1.0, (y - ytop) / h))
+        return clamp01((y - ytop) / h)
 
     def r_of(p: float) -> float:
-        cap = 0.20
-        if p <= cap:
-            return w * math.sin(math.pi / 2 * (p / cap if cap else 1.0))
-        if p <= 0.80:
-            t = (p - cap) / 0.60
-            return w * (1.0 + 0.10 * math.sin(math.pi * t))
-        t = (p - 0.80) / 0.13
-        return w * 1.05 * (1.0 - t) + 0.50 * w * t
+        q = 2.0 * p - 1.0
+        return w * math.sqrt(1.0 - q * q)
 
-    ribs = (0.08, 0.26, 0.44, 0.62, 0.80, 0.905)
-    band = max(1.0, 0.038 * n)
-    outline = max(1.0, int(0.015 * n))
-    aa = 1.15
+    band = max(1.0, 0.045 * n)
+    outline = max(1.0, int(0.012 * n))
+    aa = 1.1
+    ribs = (0.0, 0.48, 0.88)          # меридианы по нормализованной |u|
+    ring_p = 0.82                     # горизонтальное кольцо корпуса
 
-    # звёзды на небе (для крупных размеров, иначе каша)
-    stars = []
-    if n >= 48:
-        cnt = int(5 * (n / 64.0) ** 2)
-        for k in range(cnt):
-            sx = (k * 97 + 11) % n
-            sy = (k * 53 + 3) % int(0.62 * n)
-            if math.hypot(sx - xc, sy - gc) < 0.42 * n:
-                continue
-            stars.append((sx, sy, (k * 31) % 3))
-    if n >= 96:
-        for k in range(cnt):
-            sx = (k * 193 + 7) % n
-            sy = (k * 71 + 5) % int(0.55 * n)
-            if math.hypot(sx - xc, sy - gc) < 0.50 * n:
-                continue
-            stars.append((sx, sy, 2))
+    tmp = [0, 0, 0, 0]
 
-    px = pw = ph = 0.0                      # тёплые тона
-    def over(out_rgb, dst_index, scol):
+    def over(idx, scol) -> None:
         sr, sg, sb, sa = scol
         if sa <= 0:
             return
-        dr, dg, db, da = (buf[dst_index], buf[dst_index + 1],
-                          buf[dst_index + 2], buf[dst_index + 3])
+        dr, dg, db, da = (buf[idx], buf[idx + 1],
+                          buf[idx + 2], buf[idx + 3])
         if da <= 0:
-            out_rgb[0], out_rgb[1], out_rgb[2], out_rgb[3] = sr, sg, sb, sa
+            buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3] = sr, sg, sb, sa
             return
         ia = da / 255.0
         oa = sa / 255.0
         a = oa + ia * (1.0 - oa)
         if a <= 0:
-            out_rgb[0] = out_rgb[1] = out_rgb[2] = out_rgb[3] = 0
+            buf[idx] = buf[idx + 1] = buf[idx + 2] = buf[idx + 3] = 0
             return
-        out_rgb[0] = int((sr * oa + dr * ia * (1.0 - oa)) / a + 0.5)
-        out_rgb[1] = int((sg * oa + dg * ia * (1.0 - oa)) / a + 0.5)
-        out_rgb[2] = int((sb * oa + db * ia * (1.0 - oa)) / a + 0.5)
-        out_rgb[3] = int(a * 255.0 + 0.5)
+        buf[idx] = int((sr * oa + dr * ia * (1.0 - oa)) / a + 0.5)
+        buf[idx + 1] = int((sg * oa + dg * ia * (1.0 - oa)) / a + 0.5)
+        buf[idx + 2] = int((sb * oa + db * ia * (1.0 - oa)) / a + 0.5)
+        buf[idx + 3] = int(a * 255.0 + 0.5)
 
-    # слой ореола (мягкий тёплый градиент вокруг фонаря)
-    rg = 0.62 * n
+    # слой ореола — мягкий тёплый градиент вокруг фонаря
+    rg = 0.60 * n
     for ay in range(n):
         for ax in range(n):
             d = math.hypot((ax - xc) * (xc / max(rg, 1)), ay - gc) / rg
-            a = int(70.0 * clamp01(1.0 - d) ** 1.7)
+            a = int(64.0 * clamp01(1.0 - d) ** 1.7)
             if a <= 0:
                 continue
-            buf[(ay * n + ax) * 4] = 247
-            buf[(ay * n + ax) * 4 + 1] = 200
-            buf[(ay * n + ax) * 4 + 2] = 138
+            buf[(ay * n + ax) * 4] = 248
+            buf[(ay * n + ax) * 4 + 1] = 176
+            buf[(ay * n + ax) * 4 + 2] = 74
             buf[(ay * n + ax) * 4 + 3] = a
 
-    tmp = [0, 0, 0, 0]
+    # корпус: бумага + золотые рёбра и кольца
     for ay in range(n):
         p = p_of(ay)
         rh = r_of(p)
-        is_rib = any(abs(p - rp) * h <= band for rp in ribs)
+        if rh <= 0:
+            continue
+        ring = abs(p - ring_p) * h <= band
         for ax in range(n):
             ddx = abs(ax - xc)
-            base = int(ax)
-            # бумага 2D: источник и цвет по вертикали
-            top = (248, 206, 128)
-            low = (214, 132, 58)
-            pcol = tuple(int(top[c] + (low[c] - top[c]) * clamp01(p)) for c in range(3))
-            fill = False
-            if ddx <= rh - aa + 0.0:
-                fill = True
-                al = 255
-            elif ddx <= rh:
-                fill = True
-                al = int(255 * clamp01((rh - ddx) / aa))
-            if fill:
-                if is_rib:
-                    pcol = (int(pcol[0] * 0.52), int(pcol[1] * 0.42),
-                            int(pcol[2] * 0.34))
-                # 3D-подсветка: края темнее, низ чуть ярче у огня
-                sh = 1.0 - 0.30 * clamp01(ddx / max(rh, 1e-6))
-                sh = min(1.0, sh + 0.08 * clamp01((0.95 - p) / 0.30))
-                tmp[0] = int(pcol[0] * sh)
-                tmp[1] = int(pcol[1] * sh)
-                tmp[2] = int(pcol[2] * sh)
-                tmp[3] = al
-                over(tmp, (ay * n + ax) * 4, tmp)
+            idx = (ay * n + ax) * 4
+            if ddx <= rh:
+                al = 255 if ddx <= rh - aa else int(255 * clamp01(
+                    (rh - ddx) / aa))
+                u = ddx / rh
+                is_rib = any(abs(u - k) <= band / rh for k in ribs)
+                # 3D: края корпуса темнее
+                sh = 1.0 - 0.34 * clamp01(ddx / rh)
+                pur = min(1.0, sh + 0.10 * clamp01((0.98 - p) / 0.25))
+                if ring:
+                    col = lerp(GOLD, GOLD_CAP, pur)
+                    col = tuple(int(c * (1.0 - 0.18 * clamp01(ddx / rh)))
+                                for c in col)
+                elif is_rib:
+                    col = tuple(int(c * (1.0 - 0.12 * clamp01(ddx / rh)))
+                                for c in GOLD)
+                else:
+                    col = lerp(PAPER_TOP, PAPER_BOT, p)
+                    col = tuple(int(c * sh) for c in col)
+                tmp[0], tmp[1], tmp[2], tmp[3] = col[0], col[1], col[2], al
+                over(idx, tmp)
             elif ddx <= rh + outline:
                 al = int(255 * clamp01(1.0 - (ddx - rh) / outline))
                 if al > 0:
-                    tmp[0], tmp[1], tmp[2], tmp[3] = 64, 34, 18, al
-                    over(tmp, (ay * n + ax) * 4, tmp)
+                    tmp[0], tmp[1], tmp[2], tmp[3] = 84, 18, 14, al
+                    over(idx, tmp)
 
-    # пламя в устье фонаря + его блик
-    yf = ytop + 0.95 * h
-    for ay in range(int(yf - 0.05 * n), int(yf + 0.055 * n)):
-        for ax in range(int(xc - 0.12 * n), int(xc + 0.12 * n)):
-            ddx = abs(ax - xc)
-            t = (ay - yf) / (0.055 * n)
-            fw = 0.085 * n * (1.0 - abs(t))
-            if ddx > fw + 1.0:
-                continue
-            glu = (ay - yf) / (0.16 * n)
-            gl = int(80.0 * clamp01(1.0 - math.hypot((glu) * 0.9,
-                                                     ddx / (0.16 * n))))
+    # тёплый свет изнутри у нижнего среза
+    for ay in range(int(ybot - 0.16 * n), int(ybot + 0.02 * n)):
+        for ax in range(int(xc - 0.11 * n), int(xc + 0.11 * n)):
+            d = math.hypot((ay - (ybot - 0.06 * n)) / (0.02 * n),
+                           (ax - xc) / (0.13 * n))
+            gl = int(70.0 * clamp01(1.0 - d))
             if gl > 0:
-                tmp[0], tmp[1], tmp[2], tmp[3] = 255, 170, 80, gl
-                over(tmp, (ay * n + ax) * 4, tmp)
-            if ddx <= fw:
-                core = clamp01(1.0 - ddx / max(fw, 1e-6))
-                row = clamp01(1.0 - abs(t))
-                inside = row * (1.0 - 0.35 * (1.0 - core))
-                if inside > 0.15:
-                    if core > 0.72:
-                        fl = (255, 248, 214)
-                    else:
-                        fl = (255, 176, 70)
-                    tmp[0], tmp[1], tmp[2], tmp[3] = (fl[0], fl[1], fl[2],
-                                                      int(255 * inside))
-                    over(tmp, (ay * n + ax) * 4, tmp)
+                tmp[0], tmp[1], tmp[2], tmp[3] = 255, 196, 120, gl
+                over((ay * n + ax) * 4, tmp)
 
-    # звёзды
-    for (sx, sy, kind) in stars:
-        for oy in range(2 if kind >= 2 else 1):
-            for ox in range(2 if kind >= 2 else 1):
-                i = ((sy + oy) * n + (sx + ox)) * 4
-                if sy + oy < n and sx + ox < n:
-                    tmp[0], tmp[1], tmp[2], tmp[3] = 203, 216, 255, 150
-                    over(tmp, i, tmp)
+    # золотой колпачок сверху + шарик-петелька
+    ycap = ytop - 0.02 * n
+    hcap = 0.058 * n
+    wcap = 0.20 * n
+    for ay in range(int(ycap - hcap), int(ycap + hcap + 1)):
+        for ax in range(int(xc - wcap), int(xc + wcap + 1)):
+            dx = (ax - xc) / wcap
+            dy = (ay - ycap) / hcap
+            e = dx * dx + dy * dy
+            idx = (ay * n + ax) * 4
+            if e <= 1.0:
+                sh = 1.0 - 0.15 * clamp01(abs(dy))
+                col = tuple(int(c * sh) for c in GOLD_CAP)
+                tmp[0], tmp[1], tmp[2], tmp[3] = col[0], col[1], col[2], 255
+                over(idx, tmp)
+            elif e <= 1.12:
+                al = int(255 * clamp01(1.0 - (e - 1.0) / 0.12))
+                if al > 0:
+                    tmp[0], tmp[1], tmp[2], tmp[3] = 150, 106, 30, al
+                    over(idx, tmp)
+
+    # кольцо устья + тёмное отверстие
+    yring = ybot - 0.004 * n
+    wring = 0.155 * n
+    hring = 0.042 * n
+    for ay in range(int(yring - hring), int(yring + hring + 1)):
+        for ax in range(int(xc - wring), int(xc + wring + 1)):
+            dx = (ax - xc) / wring
+            dy = (ay - yring) / hring
+            e = dx * dx + dy * dy
+            idx = (ay * n + ax) * 4
+            if e <= 1.0:
+                if e <= 0.82:
+                    tmp[0], tmp[1], tmp[2], tmp[3] = 34, 10, 8, 255
+                else:
+                    sh = 1.0 - 0.20 * clamp01(abs(dy) / 0.8)
+                    col = tuple(int(c * sh) for c in GOLD)
+                    tmp[0], tmp[1], tmp[2], tmp[3] = col[0], col[1], col[2], 255
+                over(idx, tmp)
+
+    # кисточка под кольцом (на мелких размерах ими не жертвуя шириной)
+    if n >= 24:
+        ty0 = yring + 0.032 * n
+        th = 0.13 * n
+        tyb = ty0 + th
+        for ay in range(int(ty0 - 1), int(tyb + 1)):
+            t = (ay - ty0) / th
+            hw = int((0.026 * n) * (1.0 - 0.45 * t) + 0.5)
+            aal = max(1.0, 0.045 * n)
+            for ax in range(int(xc - hw) - 1, int(xc + hw) + 2):
+                ddx = abs(ax - xc)
+                if ddx <= hw:
+                    al = 255
+                elif ddx <= hw + aal:
+                    al = int(255 * clamp01(1.0 - (ddx - hw) / aal))
+                else:
+                    continue
+                col = lerp((170, 40, 34), (120, 24, 20), t)
+                idx = (ay * n + ax) * 4
+                tmp[0], tmp[1], tmp[2], tmp[3] = col[0], col[1], col[2], al
+                over(idx, tmp)
+        # золотой наконечник
+        for ay in range(int(tyb), int(tyb + 0.05 * n) + 1):
+            for ax in range(int(xc - 0.035 * n), int(xc + 0.035 * n) + 1):
+                d = math.hypot((ay - tyb) / max(0.028 * n, 1e-6),
+                               (ax - xc) / max(0.034 * n, 1e-6))
+                if d <= 1.0:
+                    al = 255 if d <= 0.85 else int(255 * clamp01(
+                        1.0 - (d - 0.85) / 0.15))
+                    sh = 1.0 - 0.2 * clamp01(abs(ax - xc) / (0.034 * n))
+                    col = tuple(int(c * sh) for c in GOLD)
+                    tmp[0], tmp[1], tmp[2], tmp[3] = col[0], col[1], col[2], al
+                    over((ay * n + ax) * 4, tmp)
 
     return buf
 
@@ -206,7 +247,7 @@ def png_blob(buf: bytearray, size: int) -> bytes:
 
 
 def build_ico() -> bytes:
-    blobs = {s: png_blob(skylamp(s), s) for s in SIZES}
+    blobs = {s: png_blob(red_lantern(s), s) for s in SIZES}
     header = struct.pack("<HHH", 0, 1, len(blobs))
     entries = []
     data = b""

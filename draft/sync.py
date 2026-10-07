@@ -68,7 +68,8 @@ def sync(config: Config, cache: Cache, *, force: bool = False,
                    if r != role]
     max_age = float(config.sync.get("max_age_hours", 24))
 
-    for entry in config.pool:
+    pool_total = len(config.pool)
+    for idx, entry in enumerate(config.pool, start=1):
         name = entry if isinstance(entry, str) else entry.get("name", "")
         cid = ch.resolve(name, index)
         if cid is None or cid not in champs:
@@ -76,7 +77,7 @@ def sync(config: Config, cache: Cache, *, force: bool = False,
             continue
         champ = champs[cid]
         if progress:
-            progress(f"{champ.name}: контрпики…")
+            progress(f"[{idx}/{pool_total}] {champ.name}: контрпики…")
 
         # --- контрпики ---
         # Роли пробуем по очереди: у чемпионов типа Lee Sin страницы для
@@ -122,7 +123,7 @@ def sync(config: Config, cache: Cache, *, force: bool = False,
 
         # --- синергии (по роли) ---
         if progress:
-            progress(f"{champ.name}: синергии…")
+            progress(f"[{idx}/{pool_total}] {champ.name}: синергии…")
         for r in role_order:
             if not force and cache.has_role(r) and not cache.is_stale(
                     cid, max_age):
@@ -147,7 +148,8 @@ def sync(config: Config, cache: Cache, *, force: bool = False,
         if want_items:
             if force or cache.items_stale(cid, counter_role_used, max_age, ver):
                 if progress:
-                    progress(f"{champ.name}: предметы…")
+                    progress(f"[{idx}/{pool_total}] {champ.name}: "
+                             f"предметы…")
                 try:
                     idata, _slug = opgg.fetch_items(champ.name,
                                                     counter_role_used)

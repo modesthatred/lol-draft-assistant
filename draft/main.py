@@ -303,6 +303,7 @@ class App:
         # целиком перезаписью словаря (update) атомарно под GIL.
         self._sync_state: dict = {
             "running": False, "stage": "", "done": 0, "total": 0, "last": "",
+            "net": False, "eta": 0, "start": None,
         }
         self._force_sync = False
         self._hotkey_in_use = self.config.hotkey
@@ -343,8 +344,13 @@ class App:
         detected = getattr(draft, "my_role", "") if draft else ""
         role = self.config.active_role(detected)
         if role not in self.pools:
-            role = self.config.role if self.config.role in self.pools \
-                else next(iter(self.pools), self.config.role)
+            # роль без пула: пробуем доп. роль (автофилл), затем основную
+            for cand in (self.config.role2, self.config.role):
+                if cand in self.pools:
+                    role = cand
+                    break
+            else:
+                role = next(iter(self.pools), role)
         return role
 
 # ---------- патч-осведомлённое обновление ----------
@@ -418,12 +424,27 @@ class App:
     _PROG_RE = re.compile(r"(\d+)/(\d+)")
 
     def _parse_progress(self, msg: str) -> dict:
-        """Достаём из строки синка стадию и счётчики для нижнего бара."""
+        """Достаём из строки синка стадию, счётчики, сеть/локально и ETA.
+
+        msg — строка из sync(): «[3/6] Vi: контрпики…» и т.п. ETA считаем от
+        фактической скорости (сделанного за время), а не от константы.
+        """
         m = self._PROG_RE.search(msg)
+        state: dict = {"stage": msg, "net": True}
         if m:
-            return {"stage": msg, "done": int(m.group(1)),
-                    "total": int(m.group(2))}
-        return {"stage": msg, "done": 0, "total": 0}
+            state["done"] = int(m.group(1))
+            state["total"] = int(m.group(2))
+        else:
+            state["done"] = state["total"] = 0
+        if "пропущ" in msg:
+            # пропуск (например «идёт драфт») — это не работа с сетью
+            state["net"] = False
+        now = time.time()
+        start = self._sync_state.get("start") or now
+        done, total = state["done"], state["total"]
+        if done and total and done < total and now > start:
+            state["eta"] = int((now - start) / done * (total - done))
+        return state
 
     def _stale_reason(self, role: str, data_patch: str,
                       league_patch: str) -> str | None:
@@ -481,12 +502,13 @@ class App:
 
         def worker():
             try:
-                self._sync_state.update({"running": True, "stage": "",
-                                         "done": 0, "total": 0,
-                                         "last": ""})
+                self._sync_state.update({
+                    "running": True, "stage": "", "done": 0, "total": 0,
+                    "last": "", "net": True, "eta": 0, "start": time.time(),
+                })
                 if on_status:
-                    on_status("обновляю статистику с OP.GG, это займёт "
-                              "около 30 секунд…")
+                    on_status("обновляю статистику: скачиваю с OP.GG "
+                              "контрпики и синергии…")
 
                 def progress(msg):
                     self._sync_state.update(self._parse_progress(msg))
@@ -505,7 +527,7 @@ class App:
                     on_status(f"не удалось обновить: {e}")
             finally:
                 self._sync_state.update(
-                    {"running": False,
+                    {"running": False, "net": False, "eta": 0,
                      "last": self.last_sync_summary or ""})
                 # перечитываем пул: после синка могли появиться иконки/метрики
                 try:

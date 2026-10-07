@@ -38,6 +38,12 @@ DEFAULTS = {
     # мейны и правильный счёт матчапа у каждой роли свои.
     "pools": {},
     "role": "mid",
+    # доп. роль (автофилл): поставили на саппорта — считаем по нему.
+    # Пусто = второй роли нет, работаем только по основной.
+    "role2": "",
+    # pool_mode: "per_role" — у каждой роли свой пул мейнов,
+    #             "shared"   — общий пул на все роли
+    "pool_mode": "per_role",
     # роль берём из драфта (клиент знает, кем тебя поставили); role выше
     # остаётся ручным запасным вариантом, если клиент роль не отдал
     "auto_role": True,
@@ -95,7 +101,15 @@ class Config:
 
         Старый плоский `pool` приводим к pools[role] — иначе после перехода
         на роли прежние мейны молча пропали бы из расчёта.
+
+        В режиме "shared" плоский общий пул раздаётся на каждую роль: на
+        какой бы позиции тебя ни поставили, блок мейнов и «вне пула» берут
+        один и тот же набор.
         """
+        if self.pool_mode == "shared":
+            flat = [str(n) for n in (self.data.get("pool") or [])
+                    if str(n).strip()]
+            return {} if not flat else {r: list(flat) for r in VALID_ROLES}
         raw = self.data.get("pools")
         out: dict[str, list[str]] = {}
         if isinstance(raw, dict):
@@ -143,6 +157,22 @@ class Config:
         # иначе старые версии программы и внешние скрипты читали бы не то
         primary = clean.get(self.role) or next(iter(clean.values()), [])
         self.data["pool"] = list(primary)
+
+    def set_shared_pool(self, names: list[str]) -> None:
+        """Один общий пул на все роли (pool_mode = "shared")."""
+        self.data["pool"] = [str(n) for n in (names or []) if str(n).strip()]
+        self.data["pools"] = {}
+
+    @property
+    def role2(self) -> str:
+        """Дополнительная роль (автофилл): "" если не задана."""
+        r = str(self.data.get("role2", "")).lower()
+        return r if r in VALID_ROLES else ""
+
+    @property
+    def pool_mode(self) -> str:
+        m = str(self.data.get("pool_mode", "per_role")).lower()
+        return m if m in ("shared", "per_role") else "per_role"
 
     @property
     def role(self) -> str:

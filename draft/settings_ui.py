@@ -62,7 +62,7 @@ class SettingsWindow:
     def _build(self) -> None:
         pad = {"padx": 14, "pady": 6}
 
-        tk.Label(self.top, text="Твоя роль", bg=BG, fg=FG,
+        tk.Label(self.top, text="Основная роль", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
         self.role = tk.StringVar()
         row = tk.Frame(self.top, bg=BG)
@@ -71,24 +71,60 @@ class SettingsWindow:
             ttk.Radiobutton(row, text=ROLE_RU[r], value=r,
                             variable=self.role).pack(side="left", padx=(0, 8))
 
-        tk.Label(self.top, text="Пул какой роли редактируем", bg=BG, fg=FG,
+        tk.Label(self.top, text="Дополнительная роль (автофилл)",
+                 bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
+        self.role2 = tk.StringVar()
+        r2row = tk.Frame(self.top, bg=BG)
+        r2row.pack(fill="x", padx=14)
+        ttk.Radiobutton(r2row, text="нет", value="",
+                        variable=self.role2).pack(side="left", padx=(0, 8))
+        for r in VALID_ROLES:
+            ttk.Radiobutton(r2row, text=ROLE_RU[r], value=r,
+                            variable=self.role2).pack(side="left",
+                                                      padx=(0, 8))
+        tk.Label(self.top,
+                 text="заполняют тебя на вторую роль (например, саппорт) — "
+                      "считаем по её пулу",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=380,
+                 justify="left").pack(anchor="w", padx=14)
+
+        tk.Label(self.top, text="Пул", bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
+        self.pool_mode = tk.StringVar(value="per_role")
+        mrow = tk.Frame(self.top, bg=BG)
+        mrow.pack(fill="x", padx=14)
+        ttk.Radiobutton(mrow, text="общий для всех ролей", value="shared",
+                        variable=self.pool_mode).pack(side="left",
+                                                      padx=(0, 12))
+        ttk.Radiobutton(mrow, text="по ролям", value="per_role",
+                        variable=self.pool_mode).pack(side="left")
+        self.pool_mode.trace_add("write", lambda *a: self._on_pool_mode())
+
+        # «Пул какой роли редактируем» — виден только в режиме «по ролям»
+        self.pool_section = tk.Frame(self.top, bg=BG)
+        self.pool_section.pack(fill="x")
+        tk.Label(self.pool_section, text="Пул какой роли редактируем",
+                 bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
         self.pool_role = tk.StringVar()
-        prow = tk.Frame(self.top, bg=BG)
+        prow = tk.Frame(self.pool_section, bg=BG)
         prow.pack(fill="x", padx=14)
         for r in VALID_ROLES:
             ttk.Radiobutton(prow, text=ROLE_RU[r], value=r,
                             variable=self.pool_role).pack(side="left",
                                                           padx=(0, 8))
         self.pool_role.trace_add("write", lambda *a: self._load_pool())
-        tk.Label(self.top,
+        tk.Label(self.pool_section,
                  text="леснику не подмешается Люкс: у каждой роли свой набор "
                       "мейнов и свой матчап",
                  bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=380,
                  justify="left").pack(anchor="w", padx=14)
 
-        tk.Label(self.top, text=f"Твои мейны (до {MAX_POOL})", bg=BG, fg=FG,
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
+        self._main_label = tk.Label(self.top, text=f"Твои мейны (до {MAX_POOL})",
+                            bg=BG, fg=FG,
+                            font=("Segoe UI", 10, "bold"))
+        self._main_label.pack(anchor="w", **pad)
         tk.Label(self.top,
                  text=f"выбрано {len(self.selected)}/{MAX_POOL} — "
                       f"порядок не важен",
@@ -288,19 +324,31 @@ class SettingsWindow:
     def _load(self) -> None:
         self.role.set(self.config.role)
         self.pool_role.set(self.config.role)
+        self.role2.set(self.config.role2)
+        self.pool_mode.set(self.config.pool_mode)
         self.hotkey.set(self.config.hotkey)
         self._load_pool()
         self._filter()
+
+    def _on_pool_mode(self, *_a) -> None:
+        if self.pool_mode.get() == "shared":
+            self.pool_section.pack_forget()
+        else:
+            self.pool_section.pack(fill="x", before=self._main_label)
+        self._load_pool()
 
     def _load_pool(self) -> None:
         """Мейны редактируемой роли в список выбранных."""
         self.search.set("")
         self.selected.clear()
-        role = self.pool_role.get()
-        pool = self.config.pools.get(role)
-        if pool is None and role == self.config.role:
-            # плоский pool из старых версий наследуют мейны ручной роли
-            pool = self.config.pool
+        if self.pool_mode.get() == "shared":
+            pool = self.config.data.get("pool") or []
+        else:
+            role = self.pool_role.get()
+            pool = self.config.pools.get(role)
+            if pool is None and role == self.config.role:
+                # плоский pool из старых версий наследуют мейны ручной роли
+                pool = self.config.pool
         for name in (pool or []):
             cid = ch.resolve(name, self.index)
             if cid and cid in self.champs:
@@ -375,13 +423,18 @@ class SettingsWindow:
                 return
 
         cfg = self.config
-        # перезаписываем пул ТОЛЬКО редактируемой роли: пулы других ролей
-        # (лес, бот, …) должны пережить сохранение настроек
-        pools = dict(cfg.pools)
-        pools[self.pool_role.get()] = [self.selected[c] for c in
-                                       self.selected]
-        cfg.set_pools(pools)
+        names = [self.selected[c] for c in self.selected]
+        if self.pool_mode.get() == "shared":
+            cfg.set_shared_pool(names)
+        else:
+            # перезаписываем пул ТОЛЬКО редактируемой роли: пулы других ролей
+            # (лес, бот, …) должны пережить сохранение настроек
+            pools = dict(cfg.pools)
+            pools[self.pool_role.get()] = names
+            cfg.set_pools(pools)
         cfg.data["role"] = self.role.get()
+        cfg.data["role2"] = self.role2.get()
+        cfg.data["pool_mode"] = self.pool_mode.get()
         cfg.data["hotkey"] = self.hotkey.get().strip() or "F8"
         cfg.data["items"] = {
             "enabled": bool(self.item_enabled.get()),

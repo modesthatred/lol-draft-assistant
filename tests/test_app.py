@@ -2282,6 +2282,166 @@ def _run_in_subprocess(name: str) -> tuple[bool, str]:
     return ("FAIL" not in out), out
 
 
+def test_config_shared_pool_replicates_to_roles() -> None:
+    """Общий пул (pool_mode=shared) отдаётся каждой роли.
+
+    Автофилл может поставить куда угодно, поэтому в shared-режиме мейны
+    берутся из плоского пула независимо от роли, а остаточный словарь
+    pools игнорируется.
+    """
+    from draft.settings import VALID_ROLES
+
+    cfg = load_config(ensure_test_config("shared_pool_cfg.json"))
+    cfg.data["pool_mode"] = "shared"
+    cfg.set_shared_pool(["Shen", "Vi"])
+    check("пул-режим: словарь per-рольных пулов очищен",
+          cfg.data["pools"] == {}, str(cfg.data["pools"]))
+    cfg.data["pools"] = {"mid": ["Ahri"]}        # должен игнорироваться
+    pools = cfg.pools
+    check("пул-режим: общий пул виден каждой роли",
+          all(pools.get(r) == ["Shen", "Vi"] for r in VALID_ROLES),
+          str(pools))
+    check("пул-режим: записан плоский пул",
+          cfg.data["pool"] == ["Shen", "Vi"], str(cfg.data["pool"]))
+    check("пул-режим: переключатель сохранён",
+          cfg.data["pool_mode"] == "shared")
+
+    del cfg.data["pool"]
+    check("пул-режим: без мейнов shared пуст",
+          cfg.pools == {}, str(cfg.pools))
+
+
+def test_config_role2_and_pool_mode_validated() -> None:
+    """Доп. роль и режим пула: неизвестные значения не ломают конфиг."""
+    cfg = load_config(ensure_test_config("role2_cfg.json"))
+    check("роль2: по умолчанию пусто", cfg.role2 == "")
+    cfg.data["role2"] = "support"
+    check("роль2: валидная роль сохранена", cfg.role2 == "support")
+    cfg.data["role2"] = "jungler"
+    check("роль2: мусор -> пусто", cfg.role2 == "")
+    cfg.data["pool_mode"] = "total"
+    check("пул-режим: мусор -> per_role", cfg.pool_mode == "per_role")
+    cfg.data["pool_mode"] = "SHARED"
+    check("пул-режим: регистр не важен", cfg.pool_mode == "shared")
+
+
+def test_active_role_falls_back_to_secondary() -> None:
+    """Активная роль: доп. роль (автофилл) прикрывает пустой пул роли."""
+    cfg = load_config(ensure_test_config("active_role_cfg.json"))
+    cfg.data["role"] = "mid"
+    cfg.data["role2"] = "support"
+    cfg.set_pools({"support": ["Janna"]})
+    app = object.__new__(App)
+    app.config = cfg
+    app.pools = {"support": []}                  # важны ключи ролей
+
+    check("активная роль: известная роль берётся как есть",
+          app.active_role(draft_map("support")) == "support", "")
+    check("активная роль: чужая роль падает на доп.",
+          app.active_role(draft_map("top")) == "support", "")
+    cfg.data["role2"] = ""
+    check("активная роль: без доп. роли — основной пул",
+          app.active_role(draft_map("adc")) == "support", "")
+
+    # общий пул: каждая роль считается своей
+    cfg.data["pool_mode"] = "shared"
+    cfg.set_shared_pool(["Shen"])
+    app.pools = {"top": [], "jungle": [], "mid": [], "adc": [],
+                 "support": []}
+    check("активная роль: shared на любой позиции",
+          app.active_role(draft_map("adc")) == "adc", "")
+
+
+def draft_map(role: str):
+    class _Draft:
+        my_role: str | None = None
+    d = _Draft()
+    d.my_role = role
+    return d
+
+
+def test_parse_progress_eta_and_net() -> None:
+    """Прогресс: счётчики, метка «сеть» и ETA по фактической скорости."""
+    import time
+
+    app = object.__new__(App)
+    app._sync_state = {"start": time.time() - 30.0}
+    st = app._parse_progress("[2/5] Shen: контрпики…")
+    check("прогресс: счётчики разобраны",
+          st.get("done") == 2 and st.get("total") == 5, str(st))
+    check("прогресс: это сеть", st.get("net") is True, str(st))
+    check("прогресс: ETA посчитан",
+          st.get("eta") and st["eta"] > 0, str(st))
+
+    st2 = app._parse_progress("чемпионы роли пропущены: идёт драфт")
+    check("прогресс: пропуск не помечен сетью", st2.get("net") is False,
+          str(st2))
+    check("прогресс: без счётчиков done/total нули",
+          st2.get("done") == 0 and st2.get("total") == 0, str(st2))
+
+    st3 = app._parse_progress("чемпионы роли mid: 40/170…")
+    check("прогресс: расширенный проход тоже разбирается",
+          st3.get("done") == 40 and st3.get("total") == 170 and
+          st3.get("net") is True, str(st3))
+
+
+def test_sync_progress_messages_have_counts() -> None:
+    """Синк сообщает «x/y» на каждом этапе пула, а не только роль-проход."""
+    import time
+
+    import draft.opgg as opgg_mod
+    import draft.sync as sync_mod
+    from draft.sync import sync
+
+    db = Path(tempfile.gettempdir()) / "opencode" / "progress_counts.db"
+    if db.is_file():
+        db.unlink()
+    cache = Cache(db)
+    champs, _index = ch.load_champions()
+    cache.save_champions(champs)
+    cfg = load_config(ensure_test_config("sync_counts.json"))
+    cfg.sync["all_champions"] = False             # этап «вне пула» не нужен
+
+    def f_cnt(_name: str, _role: str):
+        return ({"Zed": {"win_rate": 50.0}},
+                {"win_rate": 49.0, "pick_rate": 5.0}, "slug-c")
+
+    def f_syn(_name: str, _role: str):
+        return ({}, "slug-s")
+
+    def f_items(_name: str, _role: str):
+        return ({"path": [], "boots": [], "patch": "p"}, "slug-i")
+
+    messages: list[str] = []
+    orig_cnt, orig_syn, orig_items = (opgg_mod.fetch_counters,
+                                      opgg_mod.fetch_synergies,
+                                      opgg_mod.fetch_items)
+    orig_sleep = time.sleep
+    opgg_mod.fetch_counters, opgg_mod.fetch_synergies = f_cnt, f_syn
+    opgg_mod.fetch_items = f_items
+    time.sleep = lambda _s: None
+    try:
+        sync(cfg, cache, force=True, progress=messages.append,
+             want_items=True)
+    finally:
+        opgg_mod.fetch_counters, opgg_mod.fetch_synergies = orig_cnt, orig_syn
+        opgg_mod.fetch_items = orig_items
+        time.sleep = orig_sleep
+
+    check("прогресс-синк: первый шаг со счётчиком",
+          "[1/3] Shen: контрпики…" in messages,
+          "; ".join(messages[:4]))
+    check("прогресс-синк: синергии со счётчиком",
+          any(m.startswith("[") and "/3]" in m and "синергии" in m
+              for m in messages), "; ".join(messages[:6]))
+    check("прогресс-синк: предметы со счётчиком",
+          any(m.startswith("[") and "/3]" in m and "предметы" in m
+              for m in messages), "; ".join(messages[:9]))
+    check("прогресс-синк: все стадии со счётчиками",
+          all(m.startswith("[") for m in messages), "; ".join(messages[:9]))
+    cache.close()
+
+
 def main() -> int:
     # Тесты не ходят в сеть: фоновый синк живёт дольше самого теста,
     # возвращается в уже снесённый Tk (Tcl_AsyncDelete -> падение процесса)
