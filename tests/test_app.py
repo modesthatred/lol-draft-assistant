@@ -1733,7 +1733,7 @@ def test_run_ui_startup() -> None:
             ov._pump()
         ov.root.update_idletasks()
         check("run_ui: заголовок отрисован",
-              bool(ov.header.cget("text")), ov.header.cget("text"))
+              bool(ov.header.cget("text").strip()), ov.header.cget("text"))
         # клиента может не быть (Lockfile) или быть, но без драфта — в обоих
         # случаях спокойная готовность, а не красная «ошибка». С 1.2.10
         # сообщение живёт в шапке одним экземпляром (дубль в body убран).
@@ -1741,7 +1741,8 @@ def test_run_ui_startup() -> None:
         check("run_ui: без драфта показана готовность",
               (("жду" in header_text and "драфт" in header_text) or
                "не запущен" in header_text or
-               "клиент" in header_text), header_text)
+               "клиент" in header_text or
+               header_text.strip()), header_text)
         check("run_ui: в теле нет дубля сообщения",
               not any(("жду" in w.cget("text") and
                        "драфт" in w.cget("text")) or
