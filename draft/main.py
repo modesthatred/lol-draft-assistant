@@ -104,6 +104,28 @@ def notify(text: str, *, title: str = "LoL Draft Assistant",
         pass
 
 
+def ready_message(err: str) -> tuple[bool, str]:
+    """Обычное ожидание или настоящая поломка?
+
+    «Lockfile не найден» (клиент не запущен), «Сейчас не драфт» (сидим в
+    лобби) и звонок к клиенту «ещё думает» — не ошибки приложения, а
+    состояния готовности. Показывать их красным «ошибкой» — значит внушать,
+    что программа сломалась, и отбивать желание идти искать игру.
+    Возвращает (calm, text): calm=True — нейтральная строка готовности,
+    calm=False — реальная беда, её можно рисовать красным.
+    """
+    # Строки выводятся в шапку оверлея (ширина ~250 px) и должны влезать
+    # в одну строку — иначе сообщение разъезжается на несколько рядов.
+    if err.startswith("Lockfile не найден"):
+        return True, "клиент не запущен — жду запуска игры"
+    if err.startswith("Сейчас не драфт"):
+        return True, "готов: жду драфт"
+    if any(t in err for t in ("не удалось достучаться", "InProgress",
+                              "404", "GameFlow")):
+        return True, "клиент ещё созревает"
+    return False, f"проблема с клиентом: {err}"
+
+
 def build_pools(config, cache: Cache):
     """Мейны, разложенные по ролям: {"jungle": [Champion, ...], ...}.
 
@@ -507,8 +529,7 @@ class App:
                     "last": "", "net": True, "eta": 0, "start": time.time(),
                 })
                 if on_status:
-                    on_status("обновляю статистику: скачиваю с OP.GG "
-                              "контрпики и синергии…")
+                    on_status("обновляю статистику с OP.GG…")
 
                 def progress(msg):
                     self._sync_state.update(self._parse_progress(msg))
@@ -763,7 +784,10 @@ class App:
         Только сбор словарей и queue.put — ни одного вызова Tk.
         """
         if err:
-            overlay.post_error(f"Нет драфта: {err}")
+            # Транзиентные уже отсеяны в воркере — сюда попадает настоящий
+            # статус: нет драфта / клиент не запущен / поломка.
+            calm, text = ready_message(str(err))
+            overlay.post_status(text) if calm else overlay.post_error(text)
             return
         picks, draft = result
         role = self.active_role(draft)
@@ -791,13 +815,7 @@ class App:
         # on_refresh назначаем ниже: замыкания должны быть определены раньше,
         # чем оверлей начнёт по ним обращаться.
         overlay = DraftOverlay(self.config)
-        # Пока на экране стартовый итог синка, автопрятание через пару секунд
-        # законно. Любое действие (F8, трей, появление драфта) снимает флаг —
-        # и окно остаётся, где пользователь его хочет.
-        self._startup_hold = False
-
         def refresh():
-            self._startup_hold = False
             t0 = time.time()
             trace.event("hotkey", hotkey=self.config.hotkey)
             result, err = self.evaluate_now()
@@ -810,10 +828,12 @@ class App:
                 if any(t in s for t in transient):
                     overlay.show()
                     return
-                # «нет драфта» — не повод прятать окно: иначе жмыханье F8
-                # выглядит мёртвым. Показываем оверлей и самой ошибкой.
+                # «нет драфта» и «клиент не запущен» — не поломка, а ожидание:
+                # прятать окно нельзя (жмыханье F8 выглядит мёртвым), а рисовать
+                # это красной ошибкой — внушать, что приложение сломалось.
+                calm, text = ready_message(s)
                 overlay.show()
-                overlay.post_error(f"Нет драфта: {err}")
+                overlay.post_status(text) if calm else overlay.post_error(text)
                 return
             picks, draft = result
             role = self.active_role(draft)
@@ -861,8 +881,6 @@ class App:
                                  self.current_status(),
                                  self.pool_for(role), self.cache)
             extra["footer"] = self._footer_data(role)
-            # драфт есть — стартовый итог больше не актуален, не прячем
-            self._startup_hold = False
             overlay.post(picks,
                          render_header(draft, self.config, self.champs,
                                        role),
@@ -960,33 +978,29 @@ class App:
         # синк идёт в отдельном потоке, а трогать Tk можно только из
         # главного — возвращаемся в него через after()
         def after_startup_sync():
-            """Стартовый синк дошёл до конца — показываем ИТОГ, а не молчим.
+            """Стартовый синк дошёл до конца — показываем готовность.
 
-            Раньше окно после синка исчезало молча, и было непонятно, что
-            вообще обновилось. Теперь на пару секунд остаётся строка
-            «статистика обновлена: обновлено: 4, патч: 16.20.1», и только
-            потом оно само убирается — если пользователь не вмешался и драфт
-            не начался (это снимает флаг _startup_hold).
+            Раньше окно после синка исчезало молча через пару секунд:
+            «обновлено» на миг — и пропало. Молчаливое исчезновение выглядело
+            как поломка, хотя приложение как раз готово ждать драфт. Теперь
+            окно остаётся на экране и явно говорит, что ждёт; убрать его можно
+            Esc или треем. Если драфт уже идёт — рисуем состав.
             """
             try:
                 fetch_session()
-            except LcuUnavailable:
+            except LcuUnavailable as e:
                 draft_ok = False
+                _, waiting = ready_message(str(e))
             else:
                 draft_ok = True
-            summary = self.last_sync_summary or ""
-            overlay.post_status(
-                f"статистика обновлена: {summary}" if summary
-                else "статистика обновлена")
+                waiting = "готов: жду драфт"
             if draft_ok:
-                # драфт уже идёт — рисуем состав, прятать нечего
                 refresh()
                 return
-            self._startup_hold = True
-            overlay.root.after(
-                3500,
-                lambda: (self._startup_hold and not overlay.dead) and
-                overlay.hide() or None)
+            # Итог синка (сколько обновилось, сколько «появится позже») не
+            # примешиваем — строка обязана оставаться однострочной. Он в логе,
+            # а футер покажет, когда данные реально устареют.
+            overlay.post_status(waiting)
 
         def sync_then_refresh():
             self._force_sync = force_sync
@@ -994,9 +1008,7 @@ class App:
             # как «молчащий» экзешник: никакого бара, никаких дат, и неясно,
             # делает ли фон что-то вообще
             if self.needs_sync() or self._force_sync:
-                overlay.post_status(
-                    "обновляю статистику с OP.GG, это займёт около "
-                    "30 секунд…")
+                overlay.post_status("обновляю статистику с OP.GG…")
                 overlay.show()
             self.auto_sync_if_needed(on_status=overlay.post_status,
                                      on_done=self._main_thread(
@@ -1008,9 +1020,7 @@ class App:
             from .version import APP_NAME, VERSION
 
             tray = TrayIcon(f"{APP_NAME} {VERSION}",
-                            on_restore=lambda: (
-                                setattr(self, "_startup_hold", False),
-                                overlay.show())[1],
+                            on_restore=lambda: overlay.show(),
                             on_settings=open_settings,
                             on_quit=quit_app)
             if tray.start():

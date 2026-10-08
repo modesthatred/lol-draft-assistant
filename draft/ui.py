@@ -45,6 +45,21 @@ ICON_BOX_H = 66          # иконка 40 + процент под ней + за
 HEADER_CHROME = 58
 
 
+def clamp_rect(x: int, y: int, w: int, h: int,
+               vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
+    """Позиция окна: целиком за рабочим столом — в правый верх, иначе как было.
+
+    Сохранённые координаты живут дольше железа: сняли второй монитор,
+    поменяли разрешение — и оверлей «показан» уже за краем экрана, где его
+    не видно и не поймать. Любая рамка пересечения с десктопом законна;
+    полностью за пределами — ставим окно в правый верх рабочего стола.
+    """
+    if (x + w < vx or x > vx + vw - 1 or
+            y + h < vy or y > vy + vh - 1):
+        return vx + vw - w - 30, vy + vh // 3
+    return x, y
+
+
 def _tone(wr: float | None) -> str:
     if wr is None:
         return TONE_NONE
@@ -179,12 +194,16 @@ class DraftOverlay:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
         x, y = win.get("x"), win.get("y")
+        w, h = int(win.get("width", 300)), int(win.get("height", 96))
         if x is None or y is None:
-            sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            x = sw - int(win.get("width", 300)) - 30
-            y = sh // 3
-        self.root.geometry(f"+{int(x)}+{int(y)}")
+            vx, vy, vw, vh = self._desktop()
+            x = vx + vw - w - 30
+            y = vy + vh // 3
+        # Позиция из конфига могла остаться от снятого монитора или старого
+        # разрешения: окно показано, но за пределами экрана — и «показать
+        # оверлей» из трея не помогает (оно и так «видно»). Возвращаем на стол.
+        x, y = clamp_rect(int(x), int(y), w, h, *self._desktop())
+        self.root.geometry(f"+{x}+{y}")
         self._drag_offset = (0, 0)
         self._drag_origin = (0, 0)
         self._moved = False
@@ -346,8 +365,38 @@ class DraftOverlay:
         except Exception:                       # noqa: BLE001
             log.debug("не могу снять активацию окна", exc_info=True)
 
+    def _desktop(self) -> tuple[int, int, int, int]:
+        """Границы виртуального рабочего стола — все мониторы разом.
+
+        Tk на Windows отдаёт только первичный экран, а оверлей имеет право
+        стоять на втором мониторе, поэтому сравнивать с сохранённой позицией
+        нужно против объединяющего прямоугольника (SM_XVIRTUALSCREEN и друзья).
+        Вне Windows хватает экранных метрик Tk.
+        """
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                sm = ctypes.windll.user32.GetSystemMetrics
+                vx = sm(76)      # SM_XVIRTUALSCREEN
+                vy = sm(77)      # SM_YVIRTUALSCREEN
+                vw = sm(78)      # SM_CXVIRTUALSCREEN
+                vh = sm(79)      # SM_CYVIRTUALSCREEN
+                if vw > 0 and vh > 0:
+                    return vx, vy, vw, vh
+            except Exception:                   # noqa: BLE001
+                pass
+        return (0, 0, self.root.winfo_screenwidth(),
+                self.root.winfo_screenheight())
+
     def show(self):
-        if self.dead or self.visible:
+        if self.dead:
+            return
+        # Окно может быть «показано», но целиком за экраном (снятый монитор,
+        # другое разрешение): тогда deiconify() ничего не поменяет, и трей
+        # «Показать оверлей» выглядит мёртвым. Сначала возвращаем на стол.
+        self._clamp_on_screen()
+        if self.visible:
             return
         try:
             self.root.deiconify()
@@ -355,6 +404,18 @@ class DraftOverlay:
             log.debug("show() after destroy, пропускаем")
             return
         self.visible = True
+
+    def _clamp_on_screen(self) -> None:
+        """Не даём показанному оверлею остаться за пределами экрана."""
+        try:
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            w = self.root.winfo_width()
+            h = self.root.winfo_height()
+            nx, ny = clamp_rect(x, y, w, h, *self._desktop())
+            if (nx, ny) != (x, y):
+                self.root.geometry(f"+{nx}+{ny}")
+        except Exception:                   # noqa: BLE001
+            log.debug("не могу вернуть окно на экран", exc_info=True)
 
     def hide(self):
         if self.dead:
@@ -381,7 +442,9 @@ class DraftOverlay:
             w.destroy()
 
     def _render(self, kind, picks, header: str, build=None, extra=None):
-        self.header.configure(text=header)
+        # Фон по умолчанию серый: красным шапка красится только у настоящих
+        # ошибок в пустых состояниях ниже.
+        self.header.configure(text=header, fg=MUTED)
         self._clear()
         extra = extra or {}
         # Статус и доска ролей идут первыми: без них остальной текст
@@ -397,15 +460,17 @@ class DraftOverlay:
             # только когда показать нечего вообще
             if build:
                 return
+            # Сообщение живёт в шапке одним экземпляром: раньше та же строка
+            # рисовалась и в теле, поэтому «готов: жду драфт» появлялось дважды
+            # и уезжало на несколько рядов. Короткие статусы обязаны влезать
+            # в одну строку (см. ready_message в main.py).
             if kind == "error":
-                msg, fg = header, TONE_LOW
+                msg, fg = header or "ошибка", TONE_LOW
             elif kind == "status":
                 msg, fg = header, MUTED
             else:
                 msg, fg = "нет данных — обнови статистику", MUTED
-            tk.Label(self.body, text=msg, bg=BG, fg=fg,
-                     font=("Segoe UI", 10), justify="left",
-                     wraplength=self._wrap()).pack(anchor="w")
+            self.header.configure(text=msg, fg=fg)
             self._render_footer(extra)
             self._fit_width()
             return

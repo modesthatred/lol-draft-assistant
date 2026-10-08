@@ -443,6 +443,58 @@ def test_overlay_renders_all_states() -> None:
         cache.close()
 
 
+def test_clamp_rect_keeps_onscreen_and_moves_offscreen() -> None:
+    """Коррекция позиции: только целиком за экраном, любой нахлёст — в покое."""
+    from draft.ui import clamp_rect
+
+    desk = (0, 0, 1920, 1080)                       # vx, vy, vw, vh
+    check("clamp: на экране не двигаем",
+          clamp_rect(100, 100, 300, 96, *desk) == (100, 100))
+    check("clamp: нахлёст за правый край оставляем",
+          clamp_rect(1700, 100, 300, 96, *desk) == (1700, 100))
+    check("clamp: нахлёст сверху оставляем",
+          clamp_rect(100, -50, 300, 96, *desk) == (100, -50))
+    check("clamp: целиком за правым краем -> правый верх",
+          clamp_rect(3380, 227, 300, 96, *desk) == (1590, 360))
+    check("clamp: за левым краем",
+          clamp_rect(-500, 200, 300, 96, *desk) == (1590, 360))
+    check("clamp: ниже низа",
+          clamp_rect(100, 2000, 300, 96, *desk) == (1590, 360))
+    check("clamp: второй монитор справа остаётся на месте",
+          clamp_rect(3380, 227, 300, 96, 0, 0, 3840, 1080) == (3380, 227))
+
+
+def test_overlay_repositions_offscreen_saved_position() -> None:
+    """Сохранённая позиция за краем экрана (снятый монитор, старое
+    разрешение) возвращается на рабочий стол. До этого оверлей «показывался»
+    за пределами монитора: его не видно, а трей «Показать оверлей» считал
+    окно уже показанным и ничего не чинил."""
+    from draft.ui import DraftOverlay
+
+    cfg = load_config(ensure_test_config())
+    cfg.window["x"], cfg.window["y"] = 3380, 227    # за краем 1920-экрана
+    ov = DraftOverlay(cfg)
+    try:
+        ov.root.update()
+        vx, vy, vw, vh = ov._desktop()
+        x = ov.root.winfo_x()
+        check("clamp: стартовая офскрин-позиция на столе",
+              vx <= x < vx + vw - 1, f"x={x} desktop=({vx},{vy},{vw},{vh})")
+
+        # трей-«Показать оверлей»: окно «видно», но за краем — должно вернуться
+        ov.root.geometry(f"+{vw + 600}+{vy + 860}")
+        ov.root.update()
+        ov.show()                                   # как трей по клику
+        ov.root.update()
+        x = ov.root.winfo_x()
+        check("clamp: «показать оверлей» вернуло окно на стол",
+              vx <= x < vx + vw - 1, f"x={x} desktop=({vx},{vy},{vw},{vh})")
+    finally:
+        if getattr(ov, 'on_gone', None):
+            ov.on_gone()
+        ov.root.destroy()
+
+
 def test_destroy_breaks_tk_reference_cycles() -> None:
     """Регресс: Tcl_AsyncDelete — падение интерпретатора.
 
@@ -1682,13 +1734,21 @@ def test_run_ui_startup() -> None:
         ov.root.update_idletasks()
         check("run_ui: заголовок отрисован",
               bool(ov.header.cget("text")), ov.header.cget("text"))
-        # клиент не запущен — ждём сообщение об ошибке, а не исключение
-        check("run_ui: без клиента показана ошибка",
-              any("нет данных" in w.cget("text").lower() or
-                  "Lockfile" in w.cget("text") or "нет драфта" in
-                  w.cget("text").lower()
-                  for w in ov.body.winfo_children()
-                  if w.winfo_class() == "Label"),
+        # клиента может не быть (Lockfile) или быть, но без драфта — в обоих
+        # случаях спокойная готовность, а не красная «ошибка». С 1.2.10
+        # сообщение живёт в шапке одним экземпляром (дубль в body убран).
+        header_text = ov.header.cget("text")
+        check("run_ui: без драфта показана готовность",
+              (("жду" in header_text and "драфт" in header_text) or
+               "не запущен" in header_text or
+               "клиент" in header_text), header_text)
+        check("run_ui: в теле нет дубля сообщения",
+              not any(("жду" in w.cget("text") and
+                       "драфт" in w.cget("text")) or
+                      "не запущен" in w.cget("text") or
+                      "клиент" in w.cget("text")
+                      for w in ov.body.winfo_children()
+                      if w.winfo_class() == "Label"),
               str([w.cget("text") for w in ov.body.winfo_children()]))
         ov.on_refresh()          # не должно бросать
         check("run_ui: on_refresh безопасен", True)
@@ -1699,6 +1759,33 @@ def test_run_ui_startup() -> None:
         if getattr(ov, 'on_gone', None):
             ov.on_gone()
         ov.root.destroy()
+
+
+def test_ready_message_classifies_waiting_as_calm() -> None:
+    """Готовность ≠ ошибка: «Lockfile не найден» и «ещё не драфт» — обычное
+    ожидание и показываются спокойно, а не красным (иначе приложение
+    выглядит сломанным, когда оно как раз готово ждать)."""
+    from draft.main import ready_message
+
+    calm, text = ready_message("Lockfile не найден — клиент League не "
+                               "запущен, либо игра установлена на "
+                               "нестандартном диске…")
+    check("ready: lockfile → calm", calm is True)
+    check("ready: lockfile говорит про клиента", "клиент" in text or
+          "не запущен" in text, text)
+
+    calm, text = ready_message("Сейчас не драфт (ClusterState 2). "
+                               "Поддерживаются ранкед и обычная…")
+    check("ready: не драфт → calm", calm is True)
+    check("ready: не драфт пишет «жду драфт»",
+          "жду" in text and "драфт" in text, text)
+
+    calm, _ = ready_message("не удалось достучаться до клиента")
+    check("ready: клиент думает → calm", calm is True)
+
+    calm, text = ready_message("LCU ответил 500")
+    check("ready: поломка → не calm", calm is False)
+    check("ready: поломка упомянута в тексте", "проблема" in text, text)
 
 
 def test_settings_window_saves_pool() -> None:
@@ -2223,6 +2310,7 @@ TK_TESTS = {
     "test_overlay_grows_window_with_content",
     "test_overlay_renders_all_states",
     "test_overlay_renders_item_block",
+    "test_overlay_repositions_offscreen_saved_position",
     "test_destroy_breaks_tk_reference_cycles",
     "test_run_ui_startup",
     "test_settings_window_saves_pool",
