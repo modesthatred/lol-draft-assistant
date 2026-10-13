@@ -1716,6 +1716,13 @@ def test_run_ui_startup() -> None:
     # проверка ниже ловила бы то сообщение, то это. Здесь важен сам рендер,
     # а не гонка с сетью, поэтому синк отключаем явно.
     app.needs_sync = lambda: False
+    # Клиент на машине может быть живой (локфайл есть) — тогда evaluate_now
+    # отдаёт транзиентные состояния («InProgress/404/достучаться»), refresh()
+    # просто показывает окно и не постит статус, шапка остаётся пустой.
+    # Для детерминированной проверки рендера готовности подменяем вызов:
+    # путь тот же, что и в проде («сейчас не драфт» → calm-статус).
+    app.evaluate_now = lambda: (
+        None, RuntimeError("Сейчас не драфт (ClusterState 2) — тест"))
 
     orig = tkinter.Tk.mainloop
     tkinter.Tk.mainloop = lambda self, *a, **k: None      # не блокируем
@@ -1727,10 +1734,13 @@ def test_run_ui_startup() -> None:
         check("run_ui: оверлей создан", ov is not None)
         check("run_ui: on_refresh назначен", callable(ov.on_refresh))
         # рендер идёт через очередь + after(), а mainloop мы отключили,
-        # поэтому прокручиваем кадры вручную
-        for _ in range(6):
+        # поэтому прокручиваем кадры вручную — до тех пор, пока шапка
+        # не заполнится (число кадров на разных машинах/нагрузках плавает)
+        for _ in range(60):
             ov.root.update()
             ov._pump()
+            if ov.header.cget("text").strip():
+                break
         ov.root.update_idletasks()
         check("run_ui: заголовок отрисован",
               bool(ov.header.cget("text").strip()), ov.header.cget("text"))
