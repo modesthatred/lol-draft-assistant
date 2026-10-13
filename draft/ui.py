@@ -623,97 +623,108 @@ class DraftOverlay:
         tk.Label(box, text="мейны", bg=BG, fg=ACCENT,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=(2, 0))
 
-        def icon_row(parent, entries, size=15, gap=2):
+        def icon_row(parent, entries, size=17, gap=3):
             for e in entries:
                 url = e.get("url") or e.get("icon") or ""
-                key = f"d{e.get('item_id') or e.get('cid') or len(url)}"
+                key = f"d{e.get('item_id') or e.get('cid') or len(url)}{size}"
                 photo = self.icons.photo(key, url, size=size) if url else None
                 if photo is not None:
                     tk.Label(parent, image=photo, bg=BG).pack(
                         side="left", padx=(0, gap))
                     continue
                 tk.Label(parent, text="•", bg=BG, fg=MUTED,
-                         font=("Segoe UI", 8)).pack(side="left",
+                         font=("Segoe UI", 9)).pack(side="left",
                                                     padx=(0, gap))
 
         def entry_line(parent, entries, unit: str = "") -> None:
             for e in entries:
                 tk.Label(parent, text=e.get("name", ""), bg=BG, fg=FG,
-                         font=("Segoe UI", 7)).pack(side="left", padx=(0, 1))
+                         font=("Segoe UI", 8)).pack(side="left", padx=(0, 1))
                 if e.get("value") is not None:
                     tk.Label(parent, text=f"{e['value']}{unit}", bg=BG,
-                             fg=MUTED, font=("Segoe UI", 6)).pack(
-                                 side="left", padx=(0, 3))
+                             fg=MUTED, font=("Segoe UI", 7)).pack(
+                                 side="left", padx=(0, 4))
 
         for m in mains:
             head = tk.Frame(box, bg=BG)
-            head.pack(fill="x", pady=(4, 0))
+            head.pack(fill="x", pady=(6, 0))
+            # иконка чемпиона — высотой со весь блок из трёх строк (~34px),
+            # без растягивания: загружаем квадратной (subsample сохраняет
+            # пропорции), поэтому «смазывания» как при size=22 не будет
             photo = self.icons.photo(f"pm{m['cid']}", m.get("icon") or "",
-                                     size=22) if m.get("icon") else None
+                                     size=34) if m.get("icon") else None
             if photo is not None:
-                tk.Label(head, image=photo, bg=BG).pack(side="left")
+                tk.Label(head, image=photo, bg=BG).pack(side="left",
+                                                        anchor="n")
             else:
                 tk.Label(head, text="●", bg=BG, fg=MUTED,
-                         font=("Segoe UI", 10)).pack(side="left")
+                         font=("Segoe UI", 14)).pack(side="left",
+                                                     anchor="n")
             side = tk.Frame(head, bg=BG)
-            side.pack(side="left", fill="x", padx=(4, 0))
+            side.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
             # 1) баны: мои ‖ общие
             r1 = tk.Frame(side, bg=BG)
             r1.pack(fill="x")
             tk.Label(r1, text="баны", bg=BG, fg=MUTED,
-                     font=("Segoe UI", 7, "bold")).pack(side="left",
-                                                        padx=(0, 3))
+                     font=("Segoe UI", 8, "bold")).pack(side="left",
+                                                        padx=(0, 4))
             tk.Label(r1, text="мои▸", bg=BG, fg=TONE_HIGH,
-                     font=("Segoe UI", 6, "bold")).pack(side="left")
-            icon_row(r1, m["mine_bans"])
+                     font=("Segoe UI", 7, "bold")).pack(side="left")
+            icon_row(r1, m["mine_bans"], size=17)
             entry_line(r1, m["mine_bans"], "п.")
+            if not m["mine_bans"]:
+                tk.Label(r1, text="нет данных — добавь аккаунты", bg=BG,
+                         fg=MUTED, font=("Segoe UI", 7)).pack(side="left")
             tk.Label(r1, text="‖", bg=BG, fg=MUTED,
-                     font=("Segoe UI", 7)).pack(side="left", padx=2)
+                     font=("Segoe UI", 8)).pack(side="left", padx=4)
             tk.Label(r1, text="общие▸", bg=BG, fg=ACCENT,
-                     font=("Segoe UI", 6, "bold")).pack(side="left")
-            icon_row(r1, m["rival_bans"])
+                     font=("Segoe UI", 7, "bold")).pack(side="left")
+            icon_row(r1, m["rival_bans"], size=17)
             entry_line(r1, m["rival_bans"], "%")
 
             # 2) предметы: мои ‖ общие (ботинки отдельным значком в конце)
             r2 = tk.Frame(side, bg=BG)
             r2.pack(fill="x")
             tk.Label(r2, text="предм", bg=BG, fg=MUTED,
-                     font=("Segoe UI", 7, "bold")).pack(side="left",
-                                                        padx=(0, 3))
+                     font=("Segoe UI", 8, "bold")).pack(side="left",
+                                                        padx=(0, 4))
             tk.Label(r2, text="мои▸", bg=BG, fg=TONE_HIGH,
-                     font=("Segoe UI", 6, "bold")).pack(side="left")
-            icon_row(r2, m["mine_items"])
-            if m.get("mine_boots"):
+                     font=("Segoe UI", 7, "bold")).pack(side="left")
+            icon_row(r2, m["mine_items"], size=17)
+            if m["mine_items"] and m.get("mine_boots"):
                 tk.Label(r2, text="+", bg=BG, fg=MUTED,
-                         font=("Segoe UI", 7)).pack(side="left")
-                icon_row(r2, [m["mine_boots"]])
+                         font=("Segoe UI", 8)).pack(side="left")
+                icon_row(r2, [m["mine_boots"]], size=17)
             entry_line(r2, m["mine_items"], "и")
+            if not m["mine_items"]:
+                tk.Label(r2, text="нет данных — добавь аккаунты", bg=BG,
+                         fg=MUTED, font=("Segoe UI", 7)).pack(side="left")
             tk.Label(r2, text="‖", bg=BG, fg=MUTED,
-                     font=("Segoe UI", 7)).pack(side="left", padx=2)
+                     font=("Segoe UI", 8)).pack(side="left", padx=4)
             tk.Label(r2, text="общие▸", bg=BG, fg=ACCENT,
-                     font=("Segoe UI", 6, "bold")).pack(side="left")
-            icon_row(r2, m["rival_items"])
-            if m.get("rival_boots"):
+                     font=("Segoe UI", 7, "bold")).pack(side="left")
+            icon_row(r2, m["rival_items"], size=17)
+            if m["rival_items"] and m.get("rival_boots"):
                 tk.Label(r2, text="+", bg=BG, fg=MUTED,
-                         font=("Segoe UI", 7)).pack(side="left")
-                icon_row(r2, [m["rival_boots"]])
+                         font=("Segoe UI", 8)).pack(side="left")
+                icon_row(r2, [m["rival_boots"]], size=17)
             entry_line(r2, m["rival_items"], "%")
 
             # 3) руна: общая по линии
             r3 = tk.Frame(side, bg=BG)
             r3.pack(fill="x")
             tk.Label(r3, text="руна", bg=BG, fg=MUTED,
-                     font=("Segoe UI", 7, "bold")).pack(side="left",
-                                                        padx=(0, 3))
+                     font=("Segoe UI", 8, "bold")).pack(side="left",
+                                                        padx=(0, 4))
             rune = m.get("rune")
             if rune:
-                icon_row(r3, [rune], size=15)
+                icon_row(r3, [rune], size=18)
                 tk.Label(r3, text=rune.get("name", ""), bg=BG, fg=FG,
-                         font=("Segoe UI", 7)).pack(side="left", padx=(3, 0))
+                         font=("Segoe UI", 8)).pack(side="left", padx=(3, 0))
             else:
                 tk.Label(r3, text="нет данных", bg=BG, fg=MUTED,
-                         font=("Segoe UI", 7)).pack(side="left")
+                         font=("Segoe UI", 8)).pack(side="left")
 
     def _render_ban_advice(self, extra) -> None:
         """Кого банить на своей позиции.

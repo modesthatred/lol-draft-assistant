@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # SemVer. MAJOR — несовместимые изменения конфига/поведения,
 # MINOR — новая функциональность, PATCH — починки.
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 
 # Короткая подпись для заголовка окна и трея.
 APP_NAME = "LoL Draft Assistant"

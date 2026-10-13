@@ -452,6 +452,14 @@ class App:
     def __init__(self, args):
         ensure_dirs()
         self.config = load_config(args.config)
+        # 1.3.5: окно шире на ~50% (300→450). Старым конфигам с 300 тоже
+        # расширяем: сводка до драфта в узком окне уезжала в кашу из мелких
+        # строк. У кему ширина больше — не трогаем.
+        try:
+            if int(self.config.window.get("width", 450)) < 420:
+                self.config.window["width"] = 450
+        except (TypeError, ValueError):
+            self.config.window["width"] = 450
         # прокени/VPN для всех источников — до любого сетевого вызова
         from . import net
         net.set_proxy(self.config.proxy)
@@ -686,6 +694,8 @@ class App:
         """Первый запуск / устаревший кэш — обновляем сами, в фоне,
         чтобы окно не ждало сеть."""
         if not self.needs_sync() and not self._force_sync:
+            self._personal_sync_if_needed(on_status=on_status,
+                                          on_done=on_done)
             return None
 
         def worker():
@@ -722,6 +732,42 @@ class App:
                         self.config, self.cache)
                 except Exception:                   # noqa: BLE001
                     pass
+                if on_done:
+                    on_done()
+
+        t = threading.Thread(target=worker, daemon=True)
+        self._workers.append(t)
+        t.start()
+        return t
+
+    def _personal_sync_if_needed(self, on_status=None, on_done=None) -> None:
+        """Личная история игрока — отдельно от меты.
+
+        Мета может быть свежей (сингл не нужен), но личные данные устарели
+        или аккаунты только что добавлены — и тогда «мои» строки в сводке
+        пустотали. Тянем их своим тихим проходом в фоне.
+        """
+        accounts = self.config.accounts
+        if not (accounts and self.config.source_on("ugg")):
+            return None
+        try:
+            stale = self.cache.player_data_stale(
+                float(self.config.sync.get("personal_ttl_hours", 12)))
+        except Exception:                            # noqa: BLE001
+            stale = True
+        if not stale:
+            return None
+
+        def worker():
+            try:
+                if on_status:
+                    on_status("обновляю личную статистику…")
+                ok, bad = sync_personal(self.config, self.cache,
+                                        force=True)
+                log.info("personal sync ok=%s bad=%s", ok, bad)
+            except Exception:                        # noqa: BLE001
+                log.exception("personal sync failed")
+            finally:
                 if on_done:
                     on_done()
 

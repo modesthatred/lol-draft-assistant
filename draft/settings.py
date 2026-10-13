@@ -48,7 +48,7 @@ DEFAULTS = {
     # остаётся ручным запасным вариантом, если клиент роль не отдал
     "auto_role": True,
     "hotkey": "F8",
-    "window": {"width": 300, "height": 96, "x": None, "y": None,
+    "window": {"width": 450, "height": 96, "x": None, "y": None,
                "opacity": 0.94},
     "weights": {
         "counter": 0.55,      # вклад матчапа против врагов
