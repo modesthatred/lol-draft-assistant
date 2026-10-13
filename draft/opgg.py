@@ -50,22 +50,19 @@ class SourceError(RuntimeError):
 
 
 def _fetch(url: str, timeout: int = 35, retries: int = 2) -> str:
+    from . import net
+
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": UA,
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "close",
-            })
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read().decode("utf-8", "replace")
-        except Exception as e:                       # noqa: BLE001
+            return net.request(
+                url, accept="text/html,application/xhtml+xml",
+                timeout=timeout, retries=0)
+        except net.NetError as e:
             last = e
             if attempt < retries:
                 time.sleep(1.5 * (attempt + 1))
-    raise SourceError(f"{url}: {type(last).__name__}: {last}")
+    raise SourceError(f"{url}: {last}")
 
 
 def _text(s: str) -> str:

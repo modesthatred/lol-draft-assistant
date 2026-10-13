@@ -266,3 +266,91 @@ def sync_role_candidates(config: Config, cache: Cache, champs: dict,
     if not aborted:
         cache.mark_all_meta(role)
     return ok, no_role, aborted
+
+
+def sync_personal(config: Config, cache: Cache, *, progress=None,
+                  force: bool = False) -> tuple[list[str], list[str]]:
+    """Персональные данные игрока (u.gg) + мета-предметы (lolalytics).
+
+    Возвращает (готово, ошибки) человекочитаемо для статуса.
+
+    Учитываем:
+      - настройку источников (sources): без флага u.gg личную историю не
+        тянем, без lolalytics — второй билд;
+      - прокси/VPN (config.proxy) — часть сайтов отвечает только через него;
+      - TTL: перечитываем не чаще personal_ttl_hours часов (по умолчанию 12),
+        чтобы каждый запуск не долбил внешние сайты.
+    """
+    ok: list[str] = []
+    failed: list[str] = []
+    accounts = config.accounts
+    ttl = float(config.sync.get("personal_ttl_hours", 12))
+
+    want_ugg = config.source_on("ugg") and bool(accounts) and (
+        force or cache.player_data_stale(ttl))
+    want_lol = config.source_on("lolalytics")
+
+    if want_ugg and progress:
+        progress(f"личная история: {len(accounts)} акк…")
+    for acc in accounts:
+        if not want_ugg:
+            break
+        try:
+            from . import ugg
+            check = ugg.check_profile(acc["region"], acc["name"], acc["tag"])
+            if not check.get("ok"):
+                cache.save_account({**acc, "ok": False,
+                                    "error": check.get("error", "")})
+                failed.append(f"{acc['name']}: {check.get('error', '?')}")
+                continue
+            rows = ugg.matches(acc["region"], acc["name"], acc["tag"],
+                               pages=int(config.sync.get(
+                                   "personal_pages", 3)))
+            cache.save_account({**acc, "ok": True,
+                                "games": len(rows),
+                                "url": ugg.profile_url(acc["region"],
+                                                       acc["name"],
+                                                       acc["tag"])})
+            cache.save_player_matches(acc, rows)
+            # личные предметы: агрегируем выигранные сборки по чемпиону/роли
+            for champ_id, pack in ugg.personal_items(rows).items():
+                role = ugg.UGG_TO_ROLE.get(pack["role"], "")
+                if role:
+                    cache.save_player_items(
+                        champ_id, role,
+                        [{"item_id": i, "cnt": n} for i, n in pack["items"]])
+            # сводка «сколько игр/побед» по чемпионам профиля
+            try:
+                stats = ugg.champion_stats(acc["region"], acc["name"],
+                                           acc["tag"])
+                cache.save_player_champ(stats)
+            except Exception:                        # noqa: BLE001
+                pass
+            ok.append(f"{acc['name']}: {len(rows)} матчей")
+        except Exception as e:                       # noqa: BLE001
+            failed.append(f"{acc['name']}: {e}")
+        time.sleep(0.4)
+
+    if want_lol and progress:
+        progress("мета-предметы lolalytics…")
+    from . import champions as ch_mod
+    from . import lolalytics
+    champs, ver = ch_mod.load_champions()
+    index = ch_mod.build_index(champs)
+    for entry in config.pool:
+        name = entry if isinstance(entry, str) else entry.get("name", "")
+        cid = ch_mod.resolve(name, index)
+        if cid is None:
+            continue
+        role = cache.counter_role(cid) or config.role
+        if cache.meta_items_stale(cid, role, ttl, ver):
+            try:
+                build = lolalytics.fetch_build(name, role,
+                                               opgg.slug_candidates)
+            except Exception as e:                   # noqa: BLE001
+                failed.append(f"{name}: lolalytics: {e}")
+                continue
+            cache.save_meta_items(cid, role, build["core"], build["patch"])
+            ok.append(f"{name}: билд {role}")
+            time.sleep(0.3)
+    return ok, failed

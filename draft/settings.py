@@ -58,6 +58,15 @@ DEFAULTS = {
     },
     "show": {"icons": True, "comp_notes": True, "always_on_top": True},
     "items": {"enabled": True, "show_count": 3, "show_boots": True},
+    # до трёх аккаунтов игрока (мейн + смурфы на других серверах):
+    # их матчи складываются в персональные советы (предметы, баны)
+    "accounts": [],
+    # источники для парсинга в базу: op.gg (контрпики/синергии/предметы),
+    # lolalytics (мета-предметы по линии), u.gg (профиль игрока)
+    "sources": {"opgg": True, "lolalytics": True, "ugg": True},
+    # прокси/VPN для запросов к источникам: http://127.0.0.1:10808
+    # (порт бывает 10809). Пусто = прямое соединение.
+    "proxy": "",
     "sync": {"max_age_hours": 24, "synergy_roles": [],
              "patch_check_hours": 6,
              # Блок «вне пула» (топ пиков помимо мейнов) строится по данным
@@ -65,7 +74,11 @@ DEFAULTS = {
              # синка: он дольше пула, поэтому обновляется реже, а не при
              # каждом запуске.
              "all_champions": True,
-             "all_champions_ttl_hours": 168},
+             "all_champions_ttl_hours": 168,
+             # персональные данные (u.gg) перечитываем не чаще раза в 12 ч
+             "personal_ttl_hours": 12,
+             # лента матчей одного аккаунта (по 20 матчей на страницу)
+             "personal_pages": 3},
 }
 
 VALID_ROLES = ("top", "jungle", "mid", "adc", "support")
@@ -220,6 +233,55 @@ class Config:
     @property
     def sync(self) -> dict:
         return self._live("sync")
+
+    # ---------- 1.3: аккаунты, источники, прокси ----------
+    @property
+    def accounts(self) -> list[dict]:
+        """До трёх аккаунтов игрока: [{region, name, tag}, ...]."""
+        raw = self.data.get("accounts")
+        out = []
+        if isinstance(raw, list):
+            for a in raw:
+                if not isinstance(a, dict):
+                    continue
+                region = str(a.get("region", "")).strip().lower()
+                name = str(a.get("name", "")).strip()
+                tag = str(a.get("tag", "")).strip().lstrip("#")
+                if region and name and tag:
+                    out.append({"region": region, "name": name, "tag": tag})
+        return out[:3]
+
+    def set_accounts(self, accounts: list[dict]) -> None:
+        clean = []
+        for a in (accounts or [])[:3]:
+            if not isinstance(a, dict):
+                continue
+            region = str(a.get("region", "")).strip().lower()
+            name = str(a.get("name", "")).strip()
+            tag = str(a.get("tag", "")).strip().lstrip("#")
+            if region and name and tag:
+                clean.append({"region": region, "name": name, "tag": tag})
+        self.data["accounts"] = clean
+
+    @property
+    def sources(self) -> dict:
+        v = self.data.get("sources")
+        return v if isinstance(v, dict) else {}
+
+    def source_on(self, name: str) -> bool:
+        """Включён ли источник (по умолчанию — да)."""
+        return bool(self.sources.get(name, True))
+
+    @property
+    def proxy(self) -> str:
+        return str(self.data.get("proxy") or "")
+
+    @proxy.setter
+    def proxy(self, value: str) -> None:
+        v = (value or "").strip()
+        if v and "://" not in v:
+            v = "http://" + v
+        self.data["proxy"] = v
 
     def save(self) -> Path:
         target = self.path or DEFAULT_CONFIG

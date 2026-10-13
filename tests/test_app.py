@@ -1799,6 +1799,193 @@ def test_ready_message_classifies_waiting_as_calm() -> None:
     check("ready: поломка упомянута в тексте", "проблема" in text, text)
 
 
+def test_settings_accounts_and_sources_persist() -> None:
+    """1.3: аккаунты (до 3), источники и прокси живут в конфиге."""
+    from draft.settings import load_config
+
+    tmp = Path(tempfile.gettempdir()) / "opencode"
+    tmp.mkdir(exist_ok=True)
+    p = tmp / "settings_13.json"
+    p.write_text("{}", encoding="utf-8")
+    cfg = load_config(str(p))
+    check("1.3: источники по умолчанию включены",
+          cfg.source_on("opgg") and cfg.source_on("ugg")
+          and cfg.source_on("lolalytics"))
+    check("1.3: аккаунтов изначально нет", cfg.accounts == [])
+
+    cfg.set_accounts([
+        {"region": "ru", "name": "Глубокая гавань", "tag": "ru1"},
+        {"region": "euw1", "name": "Modesthate", "tag": "#euw"},
+        {"region": "na", "name": "X", "tag": "na1"},
+        {"region": "kr", "name": "лишний", "tag": "kr1"},
+    ])
+    acc = cfg.accounts
+    check("1.3: сохраняется не больше трёх аккаунтов", len(acc) == 3, str(acc))
+    check("1.3: тег чистится от #", acc[1]["tag"] == "euw", acc[1]["tag"])
+    check("1.3: регион в нижнем регистре", acc[0]["region"] == "ru")
+
+    cfg.data["sources"] = {"opgg": False, "lolalytics": True, "ugg": True}
+    check("1.3: источник выключается флагом",
+          not cfg.source_on("opgg") and cfg.source_on("ugg"))
+
+    cfg.proxy = "127.0.0.1:10808"
+    check("1.3: прокси сохраняется", cfg.proxy.startswith("http://"),
+          cfg.proxy)
+    cfg.save()
+    again = load_config(str(p))
+    check("1.3: после перезагрузки аккаунты на месте",
+          again.accounts and again.accounts[0]["name"] == "Глубокая гавань",
+          str(again.accounts))
+    check("1.3: после перезагрузки прокси на месте",
+          again.proxy.endswith(":10808"), again.proxy)
+
+
+def test_ugg_personal_aggregation() -> None:
+    """1.3: из матчей считаем личные проигрыши и личные предметы."""
+    from draft import ugg
+
+    # u.gg-роли: 1 top, 2 jungle. Матч 1: проиграл топ-лайн против Yone(777).
+    # Матч 2: выиграл лес против чемпиона 122. Предметы из победных игр.
+    rows = [
+        {"championId": 98, "win": False, "role": 1,
+         "items": [3068, 1029, 0, 0, 0, 0, 3340],
+         "teamA": [{"championId": 98, "role": 1, "teamId": 100}],
+         "teamB": [{"championId": 777, "role": 1, "teamId": 200}]},
+        {"championId": 98, "win": True, "role": 2,
+         "items": [3084, 3111, 0, 0, 0, 0, 3340],
+         "teamA": [{"championId": 122, "role": 2, "teamId": 100}],
+         "teamB": [{"championId": 98, "role": 2, "teamId": 200}]},
+    ]
+    agg = ugg.aggregate_losses(rows)
+    check("1.3: проигрыш vs Yone в роли top",
+          agg.get((1, 777), {}).get("losses") == 1
+          and agg.get((1, 777), {}).get("games") == 1,
+          str(agg))
+    check("1.3: победа в лесу не идёт в проигрыши",
+          agg.get((2, 122), {}).get("losses") == 0, str(agg))
+
+    pit = ugg.personal_items(rows)
+    check("1.3: личные предметы только из побед",
+          98 in pit and pit[98]["role"] == 2
+          and pit[98]["items"][0][0] == 3084, str(pit))
+
+
+def test_cache_personal_roundtrip() -> None:
+    """1.3: БД хранит аккаунты, личные проигрыши, личные предметы."""
+    from draft.cache import Cache
+
+    p = Path(tempfile.gettempdir()) / "opencode" / "personal_t.db"
+    if p.exists():
+        p.unlink()
+    cache = Cache(p)
+    acc = {"region": "ru", "name": "Игрок", "tag": "ru1", "url": "u",
+           "ok": True, "games": 2}
+    cache.save_account(acc)
+    check("1.3: аккаунт сохранён", len(cache.accounts()) == 1
+          and cache.accounts()[0]["ok"] is True)
+    row = {"championId": 98, "win": False, "role": 1, "items": [3068],
+           "teamA": [{"championId": 98, "role": 1, "teamId": 100}],
+           "teamB": [{"championId": 238, "role": 1, "teamId": 200}]}
+    cache.save_player_matches(acc, [row])
+    losses = cache.player_losses("top")
+    check("1.3: личный проигрыш виден в кэше",
+          losses and losses[0]["opp_id"] == 238
+          and losses[0]["losses"] == 1, str(losses))
+    cache.save_player_items(98, "top",
+                            [{"item_id": 3068, "cnt": 4}])
+    got = cache.player_items(98, "top")
+    check("1.3: личные предметы читаются",
+          got and got[0]["item_id"] == 3068 and got[0]["cnt"] == 4,
+          str(got))
+    cache.save_player_champ([
+        {"championId": 98, "totalMatches": 10, "wins": 6},
+        {"championId": 99, "totalMatches": 3, "wins": 1}])
+    pch = cache.player_champ()
+    check("1.3: сводка игрока по чемпионам",
+          pch[98] == {"games": 10, "wins": 6}, str(pch))
+    cache.close()
+
+
+def test_lolalytics_items_by_lane() -> None:
+    """1.3: билд lolalytics зависит от линии (Шен-лес != Шен-топ)."""
+    from draft import lolalytics
+
+    page = """
+    <!--t=ab-->Starting Items<!---->
+    <div><img src="https://cdn5.lolalytics.com/item64/1101.webp"
+              alt="Scorchclaw Pup"></div>
+    <!--t=cd-->Core Build<!---->
+    <img src="item64/2525.webp" alt="Protoplasm Harness">
+    <img src="item64/3111.webp" alt="Mercury's Treads">
+    <!--t=ef-->Item 4<!---->
+    <img src="item64/3748.webp" alt="Titanic Hydra">
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _Net:
+        @staticmethod
+        def get_html(url, **kw):
+            calls.append((url, str(kw)))
+            return page
+
+    import draft.net as net
+    orig = net.get_html
+    net.get_html = _Net.get_html
+    try:
+        build = lolalytics.fetch_build("Shen", "jungle",
+                                       lambda n: ["shen"])
+    finally:
+        net.get_html = orig
+    core = [i["name"] for i in build["core"]]
+    check("1.3: core-секция собрана (без Item 4)",
+          core == ["Protoplasm Harness", "Mercury's Treads"], str(core))
+    check("1.3: стартовые предметы собраны",
+          [i["name"] for i in build["start"]] == ["Scorchclaw Pup"],
+          str(build["start"]))
+    check("1.3: линия уходит в URL",
+          calls and "lane=jungle" in calls[0][0], str(calls[:1]))
+
+
+def test_build_for_pick_role_aware_and_personal() -> None:
+    """1.3: билд строится по МОЕЙ роли из драфта + есть линия игрока."""
+    from draft import main as m
+    from draft.cache import Cache
+    from draft.lcu import DraftState
+    from draft.settings import load_config
+
+    p = Path(tempfile.gettempdir()) / "opencode" / "b4p_13.json"
+    p.write_text(json.dumps({"pool": ["Shen"], "role": "support",
+                             "pools": {"support": ["Shen"]},
+                             "auto_role": True},
+                            ensure_ascii=False), encoding="utf-8")
+    cfg = load_config(str(p))
+    dbp = Path(tempfile.gettempdir()) / "opencode" / "b4p_13.db"
+    if dbp.exists():
+        dbp.unlink()
+    cache = Cache(dbp)
+    # Shen (cid 98): jungle-билд в кэше от op.gg + личные предметы
+    cache.save_items(98, "jungle", [
+        {"item_id": 3068, "name": "Sunfire Aegis", "win_rate": 52.0,
+         "games": 900}], [], patch="16.20")
+    cache.save_player_items(98, "jungle", [{"item_id": 3082, "cnt": 9}])
+    draft = DraftState.from_ids(enemies=[238], my_role="jungle",
+                                my_champion=98)
+    build = m.build_for_pick(draft, cache, cfg, {98: type("C", (), {
+        "name": "Shen", "icon": ""})()})
+    check("1.3: билд берётся по роли из драфта",
+          build and build["role"] == "jungle", str(build and
+                                                   build.get("role")))
+    check("1.3: предметы op.gg на месте",
+          build and [i["item_id"] for i in build["items"]] == [3068],
+          str(build and build.get("items")))
+    check("1.3: личная линия предметов на месте",
+          build and build.get("personal")
+          and build["personal"][0]["item_id"] == 3082
+          and build["personal"][0]["games"] == 9,
+          str(build and build.get("personal")))
+    cache.close()
+
+
 def test_settings_window_saves_pool() -> None:
     """Окно настроек: выбор роли и пула, сохранение в config.json."""
     import tkinter

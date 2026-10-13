@@ -609,37 +609,67 @@ class DraftOverlay:
 
         Бан — единственный ход вне своего пула, поэтому здесь нужен отдельный
         список: показывать мейны, которых запретить нельзя, незачем.
+
+        Две колонки: «по мете» (общий совет под драфт) и «мои проигрыши»
+        (личная история с u.gg — с кем именно игрок теряет).
         """
         advice = extra.get("ban_advice") or []
-        if not advice:
+        personal = extra.get("personal_bans") or []
+        if not advice and not personal:
             return
         box = tk.Frame(self.body, bg="#1a2130")
         box.pack(fill="x", pady=(6, 2))
-        tk.Label(box, text="кого банить", bg="#1a2130", fg=ACCENT,
+        head = "кого банить" if advice else "мои проигрыши"
+        if advice and personal:
+            head = "кого банить · мета ‖ мои проигрыши"
+        tk.Label(box, text=head, bg="#1a2130", fg=ACCENT,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w",
                                                      padx=6, pady=(4, 2))
-        for a in advice:
+        advice = advice[:3]
+        personal = personal[:3]
+        for a, p in zip(advice, personal + [None] * 3):
             row = tk.Frame(box, bg="#1a2130")
             row.pack(fill="x", padx=6, pady=1)
-            url = a.get("icon") or ""
-            photo = (self.icons.photo(f"b{a['cid']}", url, size=20)
-                     if url and a.get("cid") else None)
-            if photo is not None:
-                holder = tk.Label(row, image=photo, bg="#1a2130")
-                holder.image = photo
-                holder.pack(side="left")
-            else:
-                tk.Label(row, text="•", bg="#1a2130", fg=MUTED,
-                         font=("Segoe UI", 10)).pack(side="left")
-            tk.Label(row, text=a.get("name", ""), bg="#1a2130", fg=FG,
-                     font=("Segoe UI", 10, "bold")).pack(side="left",
-                                                         padx=(4, 0))
-            note = a.get("note") or ""
-            if note:
-                tk.Label(row, text=note, bg="#1a2130", fg=MUTED,
-                         font=("Segoe UI", 8), anchor="w",
-                         wraplength=max(120, self._wrap() - 90),
-                         justify="left").pack(side="left", padx=(6, 0))
+            if a:
+                url = a.get("icon") or ""
+                photo = (self.icons.photo(f"b{a['cid']}", url, size=20)
+                         if url and a.get("cid") else None)
+                if photo is not None:
+                    holder = tk.Label(row, image=photo, bg="#1a2130")
+                    holder.image = photo
+                    holder.pack(side="left")
+                else:
+                    tk.Label(row, text="•", bg="#1a2130", fg=MUTED,
+                             font=("Segoe UI", 10)).pack(side="left")
+                tk.Label(row, text=a.get("name", ""), bg="#1a2130", fg=FG,
+                         font=("Segoe UI", 10, "bold")).pack(side="left",
+                                                             padx=(4, 0))
+                note = a.get("note") or ""
+                if note:
+                    tk.Label(row, text=note, bg="#1a2130", fg=MUTED,
+                             font=("Segoe UI", 8), anchor="w",
+                             wraplength=max(120, self._wrap() - 90),
+                             justify="left").pack(side="left", padx=(6, 0))
+            if p:
+                # вторая колонка: личные проигрыши
+                pcol = tk.Frame(box, bg="#241a1a")
+                pcol.pack(fill="x", padx=6, pady=1)
+                url = p.get("icon") or ""
+                photo = (self.icons.photo(f"pb{p['cid']}", url, size=20)
+                         if url and p.get("cid") else None)
+                if photo is not None:
+                    holder = tk.Label(pcol, image=photo, bg="#241a1a")
+                    holder.image = photo
+                    holder.pack(side="left")
+                else:
+                    tk.Label(pcol, text="•", bg="#241a1a", fg=MUTED,
+                             font=("Segoe UI", 10)).pack(side="left")
+                tk.Label(pcol, text=p.get("name", ""), bg="#241a1a", fg=FG,
+                         font=("Segoe UI", 10, "bold")).pack(side="left",
+                                                             padx=(4, 0))
+                tk.Label(pcol, text=p.get("note", ""), bg="#241a1a",
+                         fg=TONE_HIGH, font=("Segoe UI", 8)).pack(
+                             side="left", padx=(6, 0))
 
     def _render_footer(self, extra=None) -> None:
         """Нижний бар: свежесть данных и ход обновления.
@@ -740,6 +770,32 @@ class DraftOverlay:
             entries = entries + [boots]
         for n, it in enumerate(entries, 1):
             self._render_item(line, it, last=boots is not None and n == len(entries))
+
+        # Вторая линия: моя личная история на этом чемпионе (u.gg). Идёт под
+        # метой, потому что мета отвечает «что оптимально», а линия игрока —
+        # «что забирает именно он»: у них значения совпадают не всегда.
+        personal = build.get("personal") or []
+        if personal:
+            pline = tk.Frame(self.body, bg=BG)
+            pline.pack(fill="x", pady=(0, 6))
+            tk.Label(pline, text=f"{build.get('name') or ''} · моя история",
+                     bg=BG, fg=TONE_HIGH, font=("Segoe UI", 8)).pack(
+                         side="left", padx=(0, 6))
+            for n, it in enumerate(personal, 1):
+                self._render_item(pline, it,
+                                  last=n == len(personal))
+            tk.Label(pline, text=f"{sum(p.get('games', 0) for p in personal)} игр",
+                     bg=BG, fg=MUTED, font=("Segoe UI", 7)).pack(side="left")
+
+        # Третья линия: «второе мнение» — мета-билд lolalytics по линии.
+        meta = build.get("meta") or []
+        if meta:
+            mline = tk.Frame(self.body, bg=BG)
+            mline.pack(fill="x", pady=(0, 6))
+            tk.Label(mline, text="мета по линии", bg=BG, fg=MUTED,
+                     font=("Segoe UI", 8)).pack(side="left", padx=(0, 6))
+            for n, it in enumerate(meta, 1):
+                self._render_item(mline, it, last=n == len(meta))
 
         notes = build.get("situational") or []
         if notes:

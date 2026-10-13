@@ -76,7 +76,43 @@ CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS player_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    region TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    url TEXT DEFAULT '',
+    checked_ok INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    games INTEGER DEFAULT 0,
+    updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS player_matchup (
+    acc_key TEXT NOT NULL,
+    role TEXT NOT NULL,
+    opp_id INTEGER NOT NULL,
+    games INTEGER NOT NULL,
+    losses INTEGER NOT NULL,
+    PRIMARY KEY (acc_key, role, opp_id)
+);
+CREATE TABLE IF NOT EXISTS player_items (
+    cid INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    item_id INTEGER NOT NULL,
+    cnt INTEGER NOT NULL,
+    PRIMARY KEY (cid, role, item_id)
+);
+CREATE TABLE IF NOT EXISTS player_champ (
+    cid INTEGER PRIMARY KEY,
+    games INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0
+);
 """
+
+
+def _acc_key(region: str, name: str, tag: str) -> str:
+    """Ключ аккаунта для персональных таблиц (регистр не важен)."""
+    return f"{region.strip().lower()}|{name.strip().lower()}|{tag.strip().lstrip('#').lower()}"
 
 
 class Cache:
@@ -263,6 +299,15 @@ class Cache:
             (cid, role)).fetchone()
         return r["patch"] if r else None
 
+    def item_names(self) -> dict[int, str]:
+        """Справочник id -> название предмета (из всех собранных билдов)."""
+        out: dict[int, str] = {}
+        for r in self.conn.execute(
+                "SELECT DISTINCT item_id, name FROM item_builds "
+                "WHERE name IS NOT NULL AND name != ''"):
+            out[r["item_id"]] = r["name"]
+        return out
+
     def has_items(self, cid: int, role: str) -> bool:
         return bool(self.items(cid, role, limit=1))
 
@@ -279,8 +324,133 @@ class Cache:
         # патч сменился, а предметы из старого — обязаны обновиться
         return bool(patch) and bool(r["patch"]) and r["patch"] != patch
 
-    # ---------- общее состояние (номер патча и пр.) ----------
-    def set_state(self, key: str, value: str) -> None:
+    # ---------- персональные данные игрока (u.gg) ----------
+    # Советы «что банить против моих мейнов» и «какие предметы брать мне»
+    # строятся по истории самого игрока: до трёх аккаунтов (мейн + смурфы
+    # на других серверах), их матчи складываются в один агрегат по ролям.
+    def save_account(self, acc: dict) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO player_accounts (region, name, tag, url, "
+                "checked_ok, last_error, games, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (acc.get("region", ""), acc.get("name", ""),
+                 acc.get("tag", ""), acc.get("url", ""),
+                 1 if acc.get("ok") else 0,
+                 acc.get("error", ""), acc.get("games", 0),
+                 time.time()))
+            self.conn.commit()
+
+    def accounts(self) -> list[dict]:
+        out = []
+        for r in self.conn.execute(
+                "SELECT id, region, name, tag, url, checked_ok, "
+                "last_error, games, updated_at FROM player_accounts "
+                "ORDER BY id"):
+            d = dict(r)
+            d["ok"] = bool(r["checked_ok"])
+            out.append(d)
+        return out
+
+    def delete_account(self, acc_id: int) -> None:
+        acc = next((a for a in self.accounts() if a["id"] == acc_id), None)
+        with self._lock:
+            if acc:
+                key = _acc_key(acc["region"], acc["name"], acc["tag"])
+                self.conn.execute(
+                    "DELETE FROM player_matchup WHERE acc_key=?", (key,))
+            self.conn.execute("DELETE FROM player_accounts WHERE id=?",
+                              (acc_id,))
+            self.conn.commit()
+
+    def save_player_matches(self, acc: dict, rows: list) -> None:
+        """Агрегирует матчи аккаунта в личные проигрыши по роли."""
+        from . import ugg
+        key = _acc_key(acc["region"], acc["name"], acc["tag"])
+        agg = ugg.aggregate_losses(rows)
+        with self._lock:
+            self.conn.execute("DELETE FROM player_matchup WHERE acc_key=?",
+                              (key,))
+            for (ugg_role, opp_id), v in agg.items():
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO player_matchup "
+                    "(acc_key, role, opp_id, games, losses) VALUES (?,?,?,?,?)",
+                    (key, ugg.UGG_TO_ROLE.get(ugg_role, "any"),
+                     opp_id, v["games"], v["losses"]))
+            self.conn.execute(
+                "UPDATE player_accounts SET games=?, updated_at=? "
+                "WHERE region=? AND name=? AND tag=?",
+                (len(rows), time.time(), acc.get("region", ""),
+                 acc.get("name", ""), acc.get("tag", "")))
+            self.conn.commit()
+
+    def player_losses(self, role: str = "") -> list[dict]:
+        """Кто чаще всего бьёт игрока: [{opp_id, games, losses}]."""
+        sql = ("SELECT opp_id, SUM(games) g, SUM(losses) l FROM player_matchup")
+        args: tuple = ()
+        if role:
+            # личная статистика роли + то, что набрано без роли
+            sql += " WHERE role IN (?,?)"
+            args = (role, "any")
+        sql += " GROUP BY opp_id HAVING l > 0 ORDER BY l DESC, g DESC"
+        out = []
+        for r in self.conn.execute(sql, args).fetchall():
+            out.append({"opp_id": r["opp_id"], "games": r["g"],
+                        "losses": r["l"],
+                        "loss_rate": (r["l"] / r["g"]) if r["g"] else 0.0})
+        return out
+
+    def save_player_items(self, cid: int, role: str, items: list) -> None:
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM player_items WHERE cid=? AND role=?", (cid, role))
+            self.conn.executemany(
+                "INSERT INTO player_items (cid, role, item_id, cnt) "
+                "VALUES (?,?,?,?)",
+                [(cid, role, i["item_id"], i["cnt"]) for i in items])
+            self.conn.commit()
+
+    def player_items(self, cid: int, role: str, limit: int = 3) -> list[dict]:
+        out = []
+        for r in self.conn.execute(
+                "SELECT item_id, cnt FROM player_items WHERE cid=? AND role=? "
+                "ORDER BY cnt DESC LIMIT ?", (cid, role, limit)):
+            out.append(dict(r))
+        return out
+
+    def save_player_champ(self, stats: list) -> None:
+        """Сводка по чемпионам игрока: сколько игр и побед суммарно."""
+        agg: dict[int, dict] = {}
+        for row in stats:
+            cid = row.get("championId")
+            if not cid:
+                continue
+            slot = agg.setdefault(cid, {"games": 0, "wins": 0})
+            slot["games"] += int(row.get("totalMatches") or 0)
+            slot["wins"] += int(row.get("wins") or 0)
+        with self._lock:
+            for cid, v in agg.items():
+                self.conn.execute(
+                    "INSERT INTO player_champ (cid, games, wins) VALUES (?,?,?) "
+                    "ON CONFLICT(cid) DO UPDATE SET "
+                    "games=games+excluded.games, wins=wins+excluded.wins",
+                    (cid, v["games"], v["wins"]))
+            self.conn.commit()
+
+    def player_champ(self) -> dict[int, dict]:
+        out = {}
+        for r in self.conn.execute("SELECT cid, games, wins FROM player_champ"):
+            out[r["cid"]] = {"games": r["games"], "wins": r["wins"]}
+        return out
+
+    def player_data_stale(self, max_age_h: float = 12.0) -> bool:
+        """Персональные данные перечитываем не чаще раза в max_age_h часов."""
+        r = self.conn.execute(
+            "SELECT MAX(updated_at) t FROM player_accounts").fetchone()
+        return not r or not r["t"] or \
+            (time.time() - r["t"]) > max_age_h * 3600
+
+    # ---------- общее состояние (номер патча и пр.) ----------    def set_state(self, key: str, value: str) -> None:
         with self._lock:
             self.conn.execute(
                 "INSERT INTO app_state (key, value) VALUES (?,?) "
@@ -300,6 +470,60 @@ class Cache:
     # уходил бы в сеть на десяток минут. Роль-маркер обновляется раз в
     # all_champions_ttl_hours (по умолчанию неделю).
     _ALL_META_PREFIX = "all_meta:"
+
+    # ---------- мета-предметы lolalytics (второй источник) ----------
+    def save_meta_items(self, cid: int, role: str, core: list[dict],
+                        patch: str = "") -> None:
+        """Ядро сборки с lolalytics. slot<0 — второй источник, чтобы не
+        перемешивать с основным билдом op.gg (slot>0)."""
+        now = time.time()
+        rows = [(cid, role, -(i + 1), it.get("item_id", 0),
+                 it.get("name", ""), 0.0, 0.0, 0.0, patch, now)
+                for i, it in enumerate(core or [])]
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM item_builds WHERE cid=? AND role=? AND slot<0",
+                (cid, role))
+            if rows:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO item_builds "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+            self.conn.commit()
+
+    def meta_items(self, cid: int, role: str, limit: int = 3) -> list[dict]:
+        out = []
+        for r in self.conn.execute(
+                "SELECT item_id, name, patch FROM item_builds "
+                "WHERE cid=? AND role=? AND slot<0 ORDER BY slot LIMIT ?",
+                (cid, role, limit)):
+            out.append(dict(r))
+        return out
+
+    def meta_items_stale(self, cid: int, role: str, max_age_h: float,
+                         patch: str = "") -> bool:
+        r = self.conn.execute(
+            "SELECT updated_at, patch FROM item_builds "
+            "WHERE cid=? AND role=? AND slot<0 LIMIT 1",
+            (cid, role)).fetchone()
+        if r is None:
+            return True
+        if (time.time() - (r["updated_at"] or 0)) > max_age_h * 3600:
+            return True
+        return bool(patch) and bool(r["patch"]) and r["patch"] != patch
+
+    # ---------- общее состояние (номер патча и пр.) ----------
+    def set_state(self, key: str, value: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO app_state (key, value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)))
+            self.conn.commit()
+
+    def get_state(self, key: str) -> str | None:
+        r = self.conn.execute("SELECT value FROM app_state WHERE key=?",
+                              (key,)).fetchone()
+        return r["value"] if r else None
 
     def mark_all_meta(self, role: str) -> None:
         self.set_state(self._ALL_META_PREFIX + role, str(time.time()))

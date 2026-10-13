@@ -20,7 +20,7 @@ from .hotkey import HotkeyListener
 from .lcu import LcuUnavailable, fetch_session
 from .scoring import evaluate
 from .settings import (APP_DIR, DEFAULT_DB, ensure_dirs, load_config)
-from .sync import sync
+from .sync import sync, sync_personal
 
 log = logging.getLogger("draft")
 
@@ -179,7 +179,14 @@ def build_for_pick(draft, cache, config, champs) -> dict | None:
     cid = getattr(draft, "my_champion", 0) or getattr(draft, "hovered_champion", 0)
     if not cid:
         return None
-    role = cache.counter_role(cid) or config.role
+    # Роль, на которой я сейчас играю, — она и определяет билд. Жалоба была
+    # ровно об этом: «на Шене в лесу предметы как для топа». counter_role —
+    # всего лишь роль, для которой у чемпиона нашлись контрпики, и брать по
+    # ней предметы нельзя: чемпион из пула top, а сел в лес — билд другой.
+    role = config.active_role(getattr(draft, "my_role", "") or "")
+    if role not in (cache.counter_role(cid), config.role) and \
+            not cache.has_items(cid, role):
+        role = cache.counter_role(cid) or config.role
     items = cache.items(cid, role, limit=config.items_count)
     if not items:
         # роль пика может не совпасть с ролью в конфиге (пил top-чемпиона при
@@ -218,11 +225,32 @@ def build_for_pick(draft, cache, config, champs) -> dict | None:
     }
     # Ситуативные предметы под видимых врагов: оп.гг-порядок не трогаем, но
     # подсказка «антихил/щиты/МР/армор» должна быть привязана к драфту, а не
-    # висеть статично при каждом пике.
+    # висеть статильно при каждом пике.
     enemies = getattr(draft, "enemies", None)
     if enemies and isinstance(champs, dict):
         from .situational import situational
         build["situational"] = situational(enemies, champs)
+    # Вторая линия предметов — моя собственная история (u.gg): чем я реально
+    # забираю игру на этом чемпионе/роли. Считается из матчей игрока, поэтому
+    # пустая, пока аккаунты не заданы (см. настройки).
+    personal = cache.player_items(cid, role, limit=config.items_count)
+    if personal:
+        names = cache.item_names()
+        build["personal"] = [
+            {"item_id": p["item_id"],
+             "name": names.get(p["item_id"], ""),
+             "games": p["cnt"],
+             "url": DD_ITEM.format(v=patch, i=p["item_id"])
+                    if p["item_id"] else ""}
+            for p in personal]
+        # мета-билд lolalytics по линии — «второе мнение» рядом с линией op.gg
+        meta = cache.meta_items(cid, role, limit=config.items_count)
+        if meta:
+            build["meta"] = [
+                {"item_id": m["item_id"], "name": m.get("name") or
+                 names.get(m["item_id"], ""),
+                 "patch": m.get("patch", "")}
+                for m in meta]
     return build
 
 
@@ -298,6 +326,18 @@ def render_extra(draft, champs, config, role: str, status: dict | None,
             for p in ban_advice(pool, draft, champs, cache, config,
                                 role=role)
         ]
+    # Вторая колонка банов — «с кем я сам проигрываю»: личная статистика
+    # из u.gg по аккаунтам игрока. Общий совет сверху отвечает «кого надо
+    # банить по мете», этот — «кто лично ломает мне драфт».
+    personal_bans = cache.player_losses(role)
+    if personal_bans:
+        extra["personal_bans"] = [
+            {"cid": row["opp_id"], "name": name(row["opp_id"]),
+             "icon": icon(row["opp_id"]),
+             "note": f"проигрышей {row['losses']}/{row['games']}"}
+            for row in personal_bans[:3]
+            if row["losses"] >= 1 and (row["games"]) >= 2
+        ]
     # Блок «вне пула»: топ пиков помимо мейнов для активной роли. Data есть
     # только после расширенного синка, поэтому молча пустой, пока она не
     # собрана (см. sync_role_candidates).
@@ -313,6 +353,9 @@ class App:
     def __init__(self, args):
         ensure_dirs()
         self.config = load_config(args.config)
+        # прокени/VPN для всех источников — до любого сетевого вызова
+        from . import net
+        net.set_proxy(self.config.proxy)
         self.cache = Cache(args.db or DEFAULT_DB)
         self.listener = None
 
@@ -515,6 +558,20 @@ class App:
         for name, err in report.failed:
             log.warning("sync fail %s: %s", name, err)
             say(f"  ! {name}: {str(err)[:120]}")
+        # персональная история игрока и мета-предметы lolalytics: отдельная
+        # стадия с собственным TTL (по умолчанию 12 ч) — не тащим при каждом
+        # запуске, но и не держим вечно устаревшими
+        try:
+            p_ok, p_bad = sync_personal(self.config, self.cache,
+                                         progress=progress or default,
+                                         force=force)
+            for name in p_ok:
+                say(f"  + {name}")
+            for err in p_bad:
+                log.info("personal sync: %s", err)
+                say(f"  ! {err[:120]}")
+        except Exception:                            # noqa: BLE001
+            log.exception("personal sync failed")
 
     def auto_sync_if_needed(self, on_status=None, on_done=None) -> None:
         """Первый запуск / устаревший кэш — обновляем сами, в фоне,

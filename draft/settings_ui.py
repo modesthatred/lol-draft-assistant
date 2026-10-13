@@ -1,19 +1,28 @@
-"""Окно настроек: роль, пул мейнов, хоткей, веса.
+"""Окно настроек: роль, пул мейнов, хоткей, веса, аккаунты, источники.
 
 Отдельный Toplevel, потому что оверлей намеренно работает без заголовка
 (overrideredirect) и не должен быть местом для редактирования конфига.
+
+Вёрстка: тело окна прокручиваемое (Canvas + Frame), кнопки «Сохранить» и
+«Отмена» прибиты к низу ВНЕ прокрутки. Жалоба была ровно эта: при маленьком
+окне кнопки уезжали под низ и до них нельзя было добраться. Прокрутка по
+колёсику мыши и по полосе.
 """
 from __future__ import annotations
 
 import tkinter as tk
+import threading
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, ttk
 
 from . import champions as ch
+from . import ugg
 from .cache import Cache
 from .settings import VALID_ROLES
 
 TONE_LOW = "#f0603a"
+TONE_OK = "#7fd18a"
 
 ROLE_RU = {
     "top": "Топ",
@@ -34,6 +43,13 @@ TXT_BG = "#1b1f2a"
 # кандидаты считаются по одной и той же формуле, просто их больше.
 MAX_POOL = 12
 
+# Источники данных: подпись в настройках -> ключ в конфиге.
+SOURCES = [
+    ("op.gg — контрпики, синергии, билды предметов", "opgg"),
+    ("lolalytics — мета-предметы по линии (второе мнение)", "lolalytics"),
+    ("u.gg — личная история (мои предметы и проигрыши)", "ugg"),
+]
+
 
 class SettingsWindow:
     """Модальное по смыслу, но не блокирующее окно настроек."""
@@ -47,37 +63,94 @@ class SettingsWindow:
         self.on_save = on_save
         self.selected: dict[int, str] = {}
         self._current: list[str] = []
+        # строки аккаунтов: [{region, name, tag, status, mark}]
+        self._acc_rows: list[dict] = []
+        self._source_vars: dict[str, tk.BooleanVar] = {}
 
         self.top = tk.Toplevel(parent)
         self.top.title("Настройки — LoL Draft Assistant")
         self.top.configure(bg=BG)
         self.top.transient(parent)
         self.top.resizable(True, True)
-        self.top.geometry("760x680")
-        self.top.minsize(520, 420)
+        self.top.geometry("820x720")
+        self.top.minsize(560, 420)
         self.top.grab_set()
 
+        self._build_shell()
         self._build()
         self._load()
+
+    # ---------------- каркас: скролл + зафиксированные кнопки ----------------
+    def _build_shell(self) -> None:
+        holder = tk.Frame(self.top, bg=BG)
+        holder.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(holder, bg=BG, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        body = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _sync_scroll(_evt=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _fit(_evt=None):
+            # содержимое тянем по ширине канвы, иначе секции болтаются
+            canvas.itemconfigure(win, width=_evt.width)
+
+        body.bind("<Configure>", _sync_scroll)
+        canvas.bind("<Configure>", _fit)
+        # колёсико: крутим, только когда окно настроек реально активно
+        def _wheel(evt):
+            try:
+                canvas.yview_scroll(-evt.delta // 120, "units")
+            except tk.TclError:
+                pass
+        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+            "<MouseWheel>", _wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        self.body = body
+        self._canvas = canvas
+
+        btns = tk.Frame(self.top, bg=BG)
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+        b_save = tk.Label(btns, text="Сохранить", bg=ACCENT, fg="#12151c",
+                          font=("Segoe UI", 10, "bold"), cursor="hand2",
+                          padx=16, pady=5)
+        b_save.pack(side="right")
+        b_cancel = tk.Label(btns, text="Отмена", bg=TXT_BG, fg=FG,
+                            cursor="hand2", font=("Segoe UI", 10), padx=16,
+                            pady=5)
+        b_cancel.pack(side="right", padx=(0, 8))
+        b_save.bind("<Button-1>", lambda e: self._save())
+        b_cancel.bind("<Button-1>", lambda e: self.top.destroy())
+
+    def _w(self) -> int:
+        """Ширина тела для wraplength — чтобы переносы not зависели от окна."""
+        return max(360, self.body.winfo_width() or 700)
 
     # ---------------- построение ----------------
     def _build(self) -> None:
         pad = {"padx": 14, "pady": 6}
 
-        tk.Label(self.top, text="Основная роль", bg=BG, fg=FG,
+        tk.Label(self.body, text="Основная роль", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
         self.role = tk.StringVar()
-        row = tk.Frame(self.top, bg=BG)
+        row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=14)
         for r in VALID_ROLES:
             ttk.Radiobutton(row, text=ROLE_RU[r], value=r,
                             variable=self.role).pack(side="left", padx=(0, 8))
 
-        tk.Label(self.top, text="Дополнительная роль (автофилл)",
+        tk.Label(self.body, text="Дополнительная роль (автофилл)",
                  bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
         self.role2 = tk.StringVar()
-        r2row = tk.Frame(self.top, bg=BG)
+        r2row = tk.Frame(self.body, bg=BG)
         r2row.pack(fill="x", padx=14)
         ttk.Radiobutton(r2row, text="нет", value="",
                         variable=self.role2).pack(side="left", padx=(0, 8))
@@ -85,16 +158,16 @@ class SettingsWindow:
             ttk.Radiobutton(r2row, text=ROLE_RU[r], value=r,
                             variable=self.role2).pack(side="left",
                                                       padx=(0, 8))
-        tk.Label(self.top,
+        tk.Label(self.body,
                  text="заполняют тебя на вторую роль (например, саппорт) — "
                       "считаем по её пулу",
-                 bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=380,
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=self._w(),
                  justify="left").pack(anchor="w", padx=14)
 
-        tk.Label(self.top, text="Пул", bg=BG, fg=FG,
+        tk.Label(self.body, text="Пул", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", **pad)
         self.pool_mode = tk.StringVar(value="per_role")
-        mrow = tk.Frame(self.top, bg=BG)
+        mrow = tk.Frame(self.body, bg=BG)
         mrow.pack(fill="x", padx=14)
         ttk.Radiobutton(mrow, text="общий для всех ролей", value="shared",
                         variable=self.pool_mode).pack(side="left",
@@ -104,7 +177,7 @@ class SettingsWindow:
         self.pool_mode.trace_add("write", lambda *a: self._on_pool_mode())
 
         # «Пул какой роли редактируем» — виден только в режиме «по ролям»
-        self.pool_section = tk.Frame(self.top, bg=BG)
+        self.pool_section = tk.Frame(self.body, bg=BG)
         self.pool_section.pack(fill="x")
         tk.Label(self.pool_section, text="Пул какой роли редактируем",
                  bg=BG, fg=FG,
@@ -120,14 +193,15 @@ class SettingsWindow:
         tk.Label(self.pool_section,
                  text="леснику не подмешается Люкс: у каждой роли свой набор "
                       "мейнов и свой матчап",
-                 bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=380,
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8), wraplength=self._w(),
                  justify="left").pack(anchor="w", padx=14)
 
-        self._main_label = tk.Label(self.top, text=f"Твои мейны (до {MAX_POOL})",
-                            bg=BG, fg=FG,
-                            font=("Segoe UI", 10, "bold"))
+        self._main_label = tk.Label(self.body,
+                                    text=f"Твои мейны (до {MAX_POOL})",
+                                    bg=BG, fg=FG,
+                                    font=("Segoe UI", 10, "bold"))
         self._main_label.pack(anchor="w", **pad)
-        tk.Label(self.top,
+        tk.Label(self.body,
                  text=f"выбрано {len(self.selected)}/{MAX_POOL} — "
                       f"порядок не важен",
                  bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w",
@@ -135,12 +209,12 @@ class SettingsWindow:
 
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *a: self._filter())
-        ent = tk.Entry(self.top, textvariable=self.search, bg=TXT_BG, fg=FG,
+        ent = tk.Entry(self.body, textvariable=self.search, bg=TXT_BG, fg=FG,
                        insertbackground=FG, font=("Segoe UI", 10),
                        relief="flat")
         ent.pack(fill="x", padx=14, pady=(4, 6))
 
-        mid = tk.Frame(self.top, bg=BG)
+        mid = tk.Frame(self.body, bg=BG)
         mid.pack(fill="both", expand=True, padx=14)
 
         self.listbox = tk.Listbox(mid, bg=TXT_BG, fg=FG, width=42, height=14,
@@ -165,10 +239,10 @@ class SettingsWindow:
         self.btn_rm.pack(fill="x", pady=4)
         self.btn_rm.bind("<Button-1>", lambda e: self._remove())
 
-        tk.Label(self.top, text="Выбранные мейны", bg=BG, fg=FG,
+        tk.Label(self.body, text="Выбранные мейны", bg=BG, fg=FG,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14,
                                                    pady=(10, 0))
-        chosen_wrap = tk.Frame(self.top, bg=BG)
+        chosen_wrap = tk.Frame(self.body, bg=BG)
         chosen_wrap.pack(fill="x", padx=14)
         self.chosen = tk.Listbox(chosen_wrap, bg=TXT_BG, fg=ACCENT,
                                  height=8, relief="flat",
@@ -181,19 +255,262 @@ class SettingsWindow:
         sb.pack(side="right", fill="y")
         self.chosen.configure(yscrollcommand=sb.set)
 
-        tk.Label(self.top, text="Хоткей", bg=BG, fg=FG,
+        self._build_accounts()
+        self._build_hotkey()
+        self._build_client_section()
+        self._build_items_section()
+        self._build_sources()
+        self._build_proxy()
+
+    # ---------------- аккаунты игрока ----------------
+    def _build_accounts(self) -> None:
+        """До трёх аккаунтов: мейн + смурфы на других серверах.
+
+        Их матчи складываются в персональные советы (мои предметы, мои
+        проигрыши). Ник+тег+сервер проверяются кнопкой ✓ — профиль должен
+        существовать, иначе данные будут пустыми. Клик по нику открывает
+        профиль в браузере по умолчанию.
+        """
+        tk.Label(self.body, text="Мои аккаунты (до 3)", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
-                                                     pady=(10, 0))
+                                                     pady=(12, 0))
+        tk.Label(self.body,
+                 text="личная история: мои предметы по чемпиону и с кем я "
+                      "сам проигрываю. Несколько аккаунтов складываются "
+                      "вместе (мейн + смурф)",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8),
+                 wraplength=self._w(), justify="left").pack(anchor="w",
+                                                            padx=14)
+
+        box = tk.Frame(self.body, bg=BG)
+        box.pack(fill="x", padx=14, pady=(4, 0))
+
+        head = tk.Frame(box, bg=BG)
+        head.pack(fill="x")
+        for txt, w in (("сервер", 10), ("ник", 22), ("тег", 8),
+                       ("", 18)):
+            tk.Label(head, text=txt, bg=BG, fg=MUTED,
+                     font=("Segoe UI", 8), width=w).pack(side="left")
+        tk.Label(head, text="статус", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+
+        saved = {f"{a['region']}|{a['name'].lower()}|{a['tag'].lower()}"
+                 for a in self.config.accounts}
+        for _ in range(3):
+            entry = tk.Frame(box, bg=BG)
+            entry.pack(fill="x", pady=2)
+            region = ttk.Combobox(entry, width=10, state="readonly",
+                                  font=("Segoe UI", 9))
+            region["values"] = [reg for reg, _ in ugg.REGIONS]
+            region.current(0)
+            region.pack(side="left")
+            name = tk.Entry(entry, width=22, bg=TXT_BG, fg=FG,
+                            insertbackground=FG, font=("Segoe UI", 9),
+                            relief="flat")
+            name.pack(side="left", padx=(4, 4))
+            tag = tk.Entry(entry, width=8, bg=TXT_BG, fg=FG,
+                           insertbackground=FG, font=("Segoe UI", 9),
+                           relief="flat")
+            tag.pack(side="left")
+            chk = tk.Label(entry, text="✓", bg=TXT_BG, fg=MUTED,
+                           cursor="hand2", font=("Segoe UI", 10, "bold"),
+                           padx=8, pady=1)
+            chk.pack(side="left", padx=(8, 0))
+            chk.bind("<Button-1>", lambda e, r=region, n=name, t=tag,
+                                          c=chk: self._check_account(r, n, t,
+                                                                     c))
+            status = tk.Label(entry, text="не проверен", bg=BG, fg=MUTED,
+                              font=("Segoe UI", 8), cursor="hand2")
+            status.pack(side="left", padx=(6, 0))
+            # клик по нику открывает профиль в браузере
+            status.bind("<Button-1>", lambda e, r=region, n=name,
+                                            t=tag: self._open_profile(r, n, t))
+            name.bind("<Return>", lambda e, r=region, n=name, t=tag,
+                                       c=chk: self._check_account(r, n, t, c))
+            self._acc_rows.append({"region": region, "name": name,
+                                   "tag": tag, "status": status,
+                                   "mark": chk, "ok": False,
+                                   "url": ""})
+
+        # заполняем уже сохранёнными
+        for acc, row in zip(self.config.accounts, self._acc_rows):
+            regs = [r for r, _ in ugg.REGIONS]
+            if acc["region"] in regs:
+                row["region"].current(regs.index(acc["region"]))
+            row["name"].insert(0, acc["name"])
+            row["tag"].insert(0, acc["tag"])
+            row["ok"] = True
+            row["status"].configure(text="сохранён", fg=MUTED)
+
+    def _check_account(self, region_w, name_w, tag_w, mark) -> None:
+        """Проверка «профиль существует» (в фоне, чтобы UI не стал)."""
+        region = region_w.get().strip()
+        name = name_w.get().strip()
+        tag = tag_w.get().strip()
+        if not (region and name and tag):
+            self._status_for(mark).configure(text="заполни все поля",
+                                             fg=TONE_LOW)
+            return
+        self._status_for(mark).configure(text="проверяю…", fg=MUTED)
+
+        def work():
+            res = ugg.check_profile(region, name, tag)
+            self.top.after(0, lambda: self._check_done(res, mark))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _check_done(self, res: dict, mark) -> None:
+        lbl = self._status_for(mark)
+        if res.get("ok"):
+            prof = res.get("profile") or {}
+            tier = f"{prof.get('tier') or ''} {prof.get('rank') or ''}".strip()
+            wr = ""
+            if prof.get("wins") is not None and prof.get("losses") is not None:
+                wr = f" · {prof['wins']}/{prof['losses']}"
+            lbl.configure(text=f"✓ профиль найден"
+                               + (f" · {tier}" if tier else "") + wr,
+                          fg=TONE_OK)
+            for row in self._acc_rows:
+                if row["mark"] is mark:
+                    row["ok"] = True
+        else:
+            lbl.configure(text=f"✗ {res.get('error', 'ошибка')}", fg=TONE_LOW)
+
+    def _open_profile(self, region_w, name_w, tag_w) -> None:
+        region = region_w.get().strip()
+        name = name_w.get().strip()
+        tag = tag_w.get().strip()
+        if not (region and name and tag):
+            return
+        webbrowser.open(ugg.profile_url(region, name, tag))
+
+    def _status_for(self, mark):
+        for row in self._acc_rows:
+            if row["mark"] is mark:
+                return row["status"]
+        return tk.Label()
+
+    # ---------------- источники ----------------
+    def _build_sources(self) -> None:
+        tk.Label(self.body, text="Источники данных", bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
+                                                     pady=(12, 0))
+        tk.Label(self.body,
+                 text="чем меньше источников, тем быстрее синк; лишнее "
+                      "выключается галочкой",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8),
+                 wraplength=self._w(), justify="left").pack(anchor="w",
+                                                            padx=14)
+        for text, key in SOURCES:
+            var = tk.BooleanVar(value=self.config.source_on(key))
+            self._source_vars[key] = var
+            ttk.Checkbutton(self.body, text=text, variable=var).pack(
+                anchor="w", padx=18)
+
+    # ---------------- прокси/VPN ----------------
+    def _build_proxy(self) -> None:
+        tk.Label(self.body, text="Прокси / VPN", bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
+                                                     pady=(12, 0))
+        tk.Label(self.body,
+                 text="часть сайтов открывается только через VPN. Формат: "
+                      "http://127.0.0.1:10808 (порт бывает 10809). "
+                      "Пусто = прямое соединение.",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8),
+                 wraplength=self._w(), justify="left").pack(anchor="w",
+                                                            padx=14)
+        self.proxy = tk.StringVar(value=self.config.proxy)
+        row = tk.Frame(self.body, bg=BG)
+        row.pack(fill="x", padx=14, pady=(2, 0))
+        tk.Entry(row, textvariable=self.proxy, bg=TXT_BG, fg=FG,
+                 insertbackground=FG, font=("Consolas", 9),
+                 relief="flat").pack(side="left", fill="x", expand=True)
+        btn = tk.Label(row, text="Проверить", bg=TXT_BG, fg=FG, cursor="hand2",
+                       font=("Segoe UI", 9), padx=8, pady=2)
+        btn.pack(side="left", padx=(6, 0))
+        btn.bind("<Button-1>", lambda e: self._check_sources())
+
+        self.proxy_lbl = tk.Label(self.body, text="", bg=BG, fg=MUTED,
+                                  font=("Segoe UI", 8), anchor="w",
+                                  justify="left", wraplength=self._w())
+        self.proxy_lbl.pack(fill="x", padx=14)
+
+    def _check_sources(self) -> None:
+        """Проверяем доступность источников напрямую и через прокси.
+
+        Показываем матрицу: какой сайт работает без VPN, какой — только
+        через него (чтобы предложить включить), чтобы пользователь не
+        выяснял это методом проб.
+        """
+        from . import net
+
+        self.proxy_lbl.configure(text="проверяю источники…", fg=MUTED)
+        proxy_addr = self.proxy.get().strip()
+
+        def work():
+            urls = {
+                "op.gg": "https://op.gg/lol/champions/shen/counters/support",
+                "lolalytics": "https://lolalytics.com/lol/shen/build/",
+                "u.gg": "https://u.gg/lol/profile/euw1/Modesthate-euw",
+            }
+            results: dict[str, tuple[bool, bool]] = {}
+            for label, url in urls.items():
+                direct = self._probe(url, "")
+                via = (self._probe(url, proxy_addr)
+                       if proxy_addr else direct)
+                results[label] = (direct, via)
+            net.set_proxy(proxy_addr)
+            self.top.after(0, lambda: self._show_probe(results))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _probe(url: str, proxy_addr: str) -> bool:
+        from . import net
+
+        old = net.proxy()
+        try:
+            net.set_proxy(proxy_addr)
+            net.get_html(url, timeout=8, retries=0)
+            return True
+        except Exception:                             # noqa: BLE001
+            return False
+        finally:
+            net.set_proxy(old)
+
+    def _show_probe(self, results: dict) -> None:
+        lines = []
+        need_vpn = []
+        for label, (direct, via) in results.items():
+            if direct:
+                state = "работает напрямую"
+            elif via:
+                state = "только через VPN"
+                need_vpn.append(label)
+            else:
+                state = "недоступен"
+            lines.append(f"{label}: {state}")
+        txt = " · ".join(lines)
+        if need_vpn and not self.proxy.get().strip():
+            txt += ("\n…для части источников нужен VPN — вставь адрес "
+                    "прокси и нажми «Проверить» ещё раз")
+        self.proxy_lbl.configure(
+            text=txt,
+            fg=MUTED if all(d or v for d, v in results.values())
+            else TONE_LOW)
+
+    # ---------------- хоткей / предметы / клиент ----------------
+    def _build_hotkey(self) -> None:
+        tk.Label(self.body, text="Хоткей", bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
+                                                     pady=(12, 0))
         self.hotkey = tk.StringVar()
-        hk = tk.Entry(self.top, textvariable=self.hotkey, bg=TXT_BG, fg=FG,
+        hk = tk.Entry(self.body, textvariable=self.hotkey, bg=TXT_BG, fg=FG,
                       insertbackground=FG, font=("Consolas", 11), width=10,
                       relief="flat")
         hk.pack(anchor="w", padx=14, pady=(2, 4))
-        tk.Label(self.top, text="например F8, F9, Ctrl+F8", bg=BG, fg=MUTED,
+        tk.Label(self.body, text="например F8, F9, Ctrl+F8", bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).pack(anchor="w", padx=14)
-
-        self._build_client_section()
-        self._build_items_section()
 
     def _build_items_section(self) -> None:
         """Блок предметов: показывать ли и сколько.
@@ -201,9 +518,9 @@ class SettingsWindow:
         Порядок покупки берётся из OP.GG по патчу, поэтому блок появляется
         сразу после пика, а не в конце драфта.
         """
-        tk.Label(self.top, text="Предметы", bg=BG, fg=FG,
+        tk.Label(self.body, text="Предметы", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
-                                                       pady=(12, 0))
+                                                     pady=(12, 0))
         items = self.config.items
         self.item_enabled = tk.BooleanVar(
             value=bool(items.get("enabled", True)))
@@ -213,13 +530,13 @@ class SettingsWindow:
             value=int(items.get("show_count", 3) or 3))
 
         def cb(text, var):
-            return ttk.Checkbutton(self.top, text=text, variable=var).pack(
+            return ttk.Checkbutton(self.body, text=text, variable=var).pack(
                 anchor="w", padx=14)
 
         cb("показывать первые предметы", self.item_enabled)
         cb("показывать обувь", self.item_boots)
 
-        row = tk.Frame(self.top, bg=BG)
+        row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=14, pady=(2, 0))
         tk.Label(row, text="сколько предметов", bg=BG, fg=MUTED,
                  font=("Segoe UI", 9)).pack(side="left")
@@ -227,40 +544,27 @@ class SettingsWindow:
             ttk.Radiobutton(row, text=str(n), value=n,
                             variable=self.item_count).pack(side="left",
                                                            padx=(8, 0))
-        tk.Label(self.top,
-                 text="считается по патчу: после патча билды обновляются "
-                      "автоматически",
+        tk.Label(self.body,
+                 text="две линии: мета по драфту + личная история. Лента "
+                      "lolalytics уточняет билд по твоей линии",
                  bg=BG, fg=MUTED, font=("Segoe UI", 8),
-                 wraplength=380, justify="left").pack(anchor="w", padx=14)
+                 wraplength=self._w(), justify="left").pack(anchor="w",
+                                                            padx=14)
 
         self.opacity = tk.DoubleVar()
         self.opacity.set(float(self.config.window.get("opacity", 0.94)))
-        tk.Label(self.top, text="Прозрачность окна", bg=BG, fg=FG,
+        tk.Label(self.body, text="Прозрачность окна", bg=BG, fg=FG,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14,
                                                      pady=(10, 0))
-        tk.Scale(self.top, from_=0.5, to=1.0, resolution=0.02,
+        tk.Scale(self.body, from_=0.5, to=1.0, resolution=0.02,
                  orient="horizontal", variable=self.opacity, bg=BG, fg=FG,
                  troughcolor=TXT_BG, activebackground=ACCENT,
                  highlightthickness=0, bd=0).pack(fill="x", padx=14)
 
-        self.count_lbl = tk.Label(self.top, text="", bg=BG, fg=MUTED,
+        self.count_lbl = tk.Label(self.body, text="", bg=BG, fg=MUTED,
                                   font=("Segoe UI", 8))
         self.count_lbl.pack(anchor="w", padx=14)
 
-        btns = tk.Frame(self.top, bg=BG)
-        btns.pack(fill="x", padx=14, pady=12)
-        b_save = tk.Label(btns, text="Сохранить", bg=ACCENT, fg="#12151c",
-                          font=("Segoe UI", 10, "bold"), cursor="hand2",
-                          padx=16, pady=5)
-        b_save.pack(side="right")
-        b_cancel = tk.Label(btns, text="Отмена", bg=TXT_BG, fg=FG,
-                            cursor="hand2", font=("Segoe UI", 10), padx=16,
-                            pady=5)
-        b_cancel.pack(side="right", padx=(0, 8))
-        b_save.bind("<Button-1>", lambda e: self._save())
-        b_cancel.bind("<Button-1>", lambda e: self.top.destroy())
-
-    # ---------------- клиент League ----------------
     def _build_client_section(self) -> None:
         """Путь к папке с игрой.
 
@@ -269,12 +573,13 @@ class SettingsWindow:
         """
         from . import lcu
 
-        tk.Label(self.top, text="Папка с игрой (где LeagueClient.exe)",
+        tk.Label(self.body, text="Папка с игрой (где LeagueClient.exe)",
                  bg=BG, fg=FG, font=("Segoe UI", 10, "bold")).pack(
                      anchor="w", padx=14, pady=(12, 0))
 
-        self.league_path = tk.StringVar(value=str(lcu.detect_league_path() or ""))
-        row = tk.Frame(self.top, bg=BG)
+        self.league_path = tk.StringVar(
+            value=str(lcu.detect_league_path() or ""))
+        row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=14, pady=(2, 2))
         tk.Entry(row, textvariable=self.league_path, bg=TXT_BG, fg=FG,
                  insertbackground=FG, font=("Consolas", 9),
@@ -300,9 +605,9 @@ class SettingsWindow:
             b.pack(side="left", padx=(6, 0))
             b.bind("<Button-1>", lambda e, c=cmd: c())
 
-        self.client_lbl = tk.Label(self.top, text="", bg=BG, fg=MUTED,
+        self.client_lbl = tk.Label(self.body, text="", bg=BG, fg=MUTED,
                                    font=("Segoe UI", 8), anchor="w",
-                                   justify="left", wraplength=380)
+                                   justify="left", wraplength=self._w())
         self.client_lbl.pack(fill="x", padx=14)
         self._client_status()
 
@@ -320,7 +625,7 @@ class SettingsWindow:
         self.client_lbl.configure(
             text=("найден Lockfile" if ok else
                   "в этой папке нет Lockfile — проверь путь"),
-            fg="#7fd18a" if ok else TONE_LOW)
+            fg=TONE_OK if ok else TONE_LOW)
 
     # ---------------- данные ----------------
     def _load(self) -> None:
@@ -444,6 +749,18 @@ class SettingsWindow:
             "show_count": max(1, min(5, int(self.item_count.get() or 3))),
         }
         cfg.window["opacity"] = round(float(self.opacity.get()), 2)
+        # 1.3: аккаунты, источники, прокси
+        accounts = []
+        for row in self._acc_rows:
+            reg = row["region"].get().strip()
+            nm = row["name"].get().strip()
+            tg = row["tag"].get().strip()
+            if reg and nm and tg:
+                accounts.append({"region": reg, "name": nm, "tag": tg})
+        cfg.set_accounts(accounts)
+        cfg.data["sources"] = {k: bool(v.get())
+                               for k, v in self._source_vars.items()}
+        cfg.proxy = self.proxy.get().strip()
         cfg.save()
         self.top.destroy()
         if self.on_save:
