@@ -30,11 +30,14 @@ UGG_TO_ROLE = {v: k for k, v in ROLE_TO_UGG.items()}
 ROLE_ANY = 7
 CURRENT_SEASON = 26
 
-# сервера, на которых чаще всего играют русскоязычные (+ мировые)
+# сервера, на которых чаще всего играют русскоязычные (+ мировые).
+# Код — тот, который u.gg принимает и в URL профиля, и в GraphQL:
+# это riot-id региона (euw1, eun1), а не «человеческий» EUW/EUNE. С сайтом
+# «euw» в ссылке даёт 404, хотя профиль существует.
 REGIONS = [
     ("ru", "Russia (RU)"),
-    ("euw", "Europe West (EUW)"),
-    ("eune", "Europe Nordic & East (EUNE)"),
+    ("euw1", "Europe West (EUW)"),
+    ("eun1", "Europe Nordic & East (EUNE)"),
     ("na", "North America (NA)"),
     ("kr", "Korea (KR)"),
     ("br", "Brazil (BR)"),
@@ -48,6 +51,35 @@ REGIONS = [
     ("vn", "Vietnam (VN)"),
     ("th", "Thailand (TH)"),
 ]
+
+# Алиасы человеческих названий: раньше в настройках были euw/eune, и
+# сохранённые конфиги не должны ломаться после исправления кодов.
+REGION_ALIASES = {
+    "euw": "euw1",
+    "eune": "eun1",
+    "eun": "eun1",
+    "eu": "euw1",
+    "west": "euw1",
+    "ru": "ru",
+    "kr": "kr",
+    "na": "na",
+    "br": "br",
+    "lan": "lan",
+    "las": "las",
+    "oce": "oce",
+    "tr": "tr",
+    "jp": "jp",
+    "sg": "sg",
+    "tw": "tw",
+    "vn": "vn",
+    "th": "th",
+}
+
+
+def norm_region(region: str) -> str:
+    """Приводит код региона к тому, что понимает u.gg."""
+    code = (region or "").strip().lower()
+    return REGION_ALIASES.get(code, code)
 
 Q_CHECK = """
 query($regionId:String!,$riotTagLine:String!,$riotUserName:String!){
@@ -88,7 +120,7 @@ class UggError(RuntimeError):
 
 
 def profile_url(region: str, name: str, tag: str) -> str:
-    return PROFILE_URL.format(region=region.strip().lower(),
+    return PROFILE_URL.format(region=norm_region(region),
                               name=name.strip().replace(" ", "%20"),
                               tag=tag.strip())
 
@@ -110,7 +142,7 @@ def check_profile(region: str, name: str, tag: str) -> dict:
     Возвращает {"ok": True, "profile": {...}} либо {"ok": False, "error": "..."}
     — показываем пользователю в настройках галочкой/крестиком.
     """
-    region = region.strip().lower()
+    region = norm_region(region)
     name = name.strip()
     tag = tag.strip().lstrip("#")
     if not (region and name and tag):
@@ -146,7 +178,7 @@ def champion_stats(region: str, name: str, tag: str,
                    role: str = "", season: int = CURRENT_SEASON) -> list:
     """Победы/игры по чемпионам профиля. role="" → все роли."""
     role_id = ROLE_TO_UGG.get(role, ROLE_ANY)
-    data = _gql(Q_CHAMPION_STATS, {"regionId": region.strip().lower(),
+    data = _gql(Q_CHAMPION_STATS, {"regionId": norm_region(region),
                                    "riotTagLine": tag.strip().lstrip("#"),
                                    "riotUserName": name.strip(),
                                    "seasonId": season, "role": role_id})
@@ -162,7 +194,7 @@ def matches(region: str, name: str, tag: str, pages: int = 3) -> list:
     """Последние матчи (по 20 на страницу) с составами команд."""
     rows: list[dict] = []
     for page in range(1, max(1, pages) + 1):
-        data = _gql(Q_MATCHES, {"regionId": region.strip().lower(),
+        data = _gql(Q_MATCHES, {"regionId": norm_region(region),
                                 "riotTagLine": tag.strip().lstrip("#"),
                                 "riotUserName": name.strip(), "page": page})
         pack = data.get("fetchPlayerMatchSummaries") or {}

@@ -84,6 +84,15 @@ DEFAULTS = {
 VALID_ROLES = ("top", "jungle", "mid", "adc", "support")
 ALL_ROLES = VALID_ROLES
 
+# Регион игрока: в конфиге он мог сохраниться «по-человечески» (euw), а
+# u.gg понимает riot-код (euw1). Нормализуем в одном месте.
+_REGION_CODES = {"euw": "euw1", "eune": "eun1", "eun": "eun1", "eu": "euw1"}
+
+
+def _norm_region_code(region: str) -> str:
+    code = (region or "").strip().lower()
+    return _REGION_CODES.get(code, code)
+
 
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
@@ -237,7 +246,11 @@ class Config:
     # ---------- 1.3: аккаунты, источники, прокси ----------
     @property
     def accounts(self) -> list[dict]:
-        """До трёх аккаунтов игрока: [{region, name, tag}, ...]."""
+        """До трёх аккаунтов игрока: [{region, name, tag}, ...].
+
+        Регион приводим к коду u.gg (euw1, eun1) — старые конфиги могли
+        хранить “euw”, и без нормализации профиль не находился бы.
+        """
         raw = self.data.get("accounts")
         out = []
         if isinstance(raw, list):
@@ -248,7 +261,8 @@ class Config:
                 name = str(a.get("name", "")).strip()
                 tag = str(a.get("tag", "")).strip().lstrip("#")
                 if region and name and tag:
-                    out.append({"region": region, "name": name, "tag": tag})
+                    out.append({"region": _norm_region_code(region),
+                                "name": name, "tag": tag})
         return out[:3]
 
     def set_accounts(self, accounts: list[dict]) -> None:

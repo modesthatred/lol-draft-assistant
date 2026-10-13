@@ -1799,6 +1799,28 @@ def test_ready_message_classifies_waiting_as_calm() -> None:
     check("ready: поломка упомянута в тексте", "проблема" in text, text)
 
 
+def test_ugg_region_alias_euw1() -> None:
+    """1.3.1: «euw» в настройках — это euw1 в URL и запросах u.gg."""
+    from draft import ugg
+    from draft.settings import load_config
+
+    check("1.3.1: euw нормализуется в euw1", ugg.norm_region("euw") == "euw1",
+          ugg.norm_region("euw"))
+    check("1.3.1: eune нормализуется в eun1",
+          ugg.norm_region("eune") == "eun1", ugg.norm_region("eune"))
+    url = ugg.profile_url("euw", "Modesthate", "euw")
+    check("1.3.1: ссылка на профиль с riot-кодом",
+          "/profile/euw1/Modesthate-euw" in url, url)
+    tmp = Path(tempfile.gettempdir()) / "opencode"
+    p = tmp / "alias_reg.json"
+    p.write_text(json.dumps({"accounts": [{"region": "euw", "name": "X",
+                                           "tag": "y"}]}),
+                 encoding="utf-8")
+    cfg = load_config(str(p))
+    check("1.3.1: конфиг отдаёт euw1", cfg.accounts[0]["region"] == "euw1",
+          str(cfg.accounts))
+
+
 def test_settings_accounts_and_sources_persist() -> None:
     """1.3: аккаунты (до 3), источники и прокси живут в конфиге."""
     from draft.settings import load_config
