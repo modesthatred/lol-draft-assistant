@@ -207,20 +207,21 @@ def matches(region: str, name: str, tag: str, pages: int = 3) -> list:
 
 
 def aggregate_losses(rows: list) -> dict:
-    """Против кого игрок проигрывает, с разбивкой по роли.
+    """Против кого игрок проигрывает, с разбивкой по чемпиону и роли.
 
-    Возвращает {(ugg_role, enemy_champ_id): {"games": n, "losses": n}}.
+    Возвращает {(my_champ, ugg_role, enemy_champ_id): {"games": n, "losses": n}}.
     Берём врага в той же роли (direct lane matchup) — именно он решает
     линию. Роль 7 (любая/неизвестная) идёт отдельной строкой.
     """
-    agg: dict[tuple[int, int], dict] = {}
+    agg: dict[tuple[int, int, int], dict] = {}
     for m in rows:
         won = bool(m.get("win"))
+        my_champ = m.get("championId") or 0
         my_role = m.get("role") or 7
         my_team = None
         for team in ("teamA", "teamB"):
             for p in m.get(team) or []:
-                if p.get("championId") == m.get("championId") and \
+                if p.get("championId") == my_champ and \
                         p.get("role") == my_role:
                     my_team = p.get("teamId")
         if my_team is None:
@@ -234,7 +235,7 @@ def aggregate_losses(rows: list) -> dict:
                 ch = p.get("championId")
                 if not ch:
                     continue
-                slot = agg.setdefault((my_role, ch),
+                slot = agg.setdefault((my_champ, my_role, ch),
                                       {"games": 0, "losses": 0})
                 slot["games"] += 1
                 if not won:

@@ -255,79 +255,102 @@ def build_for_pick(draft, cache, config, champs) -> dict | None:
 
 
 def pre_draft_summary(cache, config, role: str, champs) -> dict:
-    """Сводка до драфта: мейны, топ банов и топ сборок — мета и моя.
+    """Сводка до драфта: до 4 мейнов, у каждого 3 строки напротив иконки.
 
-    Пока драфт не начался, situational-советов нет (жмыханье F8 в лобби
-    бесполезно), но общая картина по пулу полезна всегда: кого банить на
-    своей позиции по мете и что собирать. «Моя» часть — личная история с
-    u.gg (мои проигрыши и мои предметы). Всё считается из локальной базы,
-    поэтому зовётся на каждом статусе без тормозов.
+    По каждому мейну роли:
+      • баны — мои топ-3 (с кем именно на нём проигрываю) и общие топ-3
+        (кого баню против него по мете);
+      • предметы — мои топ-3 больших + ботинки, и общие топ-3 по винрейту
+        + ботинки;
+      • руна — главная по линии (общая).
+    Всё из локальной базы: во время показа сеть не трогаем.
     """
     pool_names = config.pool_for(role) if role else []
     if not pool_names:
         return {}
-    index = {c.cid for c in champs.values()} if isinstance(champs, dict) else set()
-    by_name = {getattr(c, "name", "").lower(): c.cid
-               for c in champs.values()} if isinstance(champs, dict) else {}
-    mains: list[dict] = []
-    cids: list[int] = []
-    for name in pool_names:
-        cid = by_name.get(str(name).lower())
-        if cid is None:
-            continue
-        cids.append(cid)
-        mains.append({"cid": cid, "name": getattr(champs[cid], "name", name),
-                      "icon": getattr(champs[cid], "icon", "")})
-
-    def names_for(ids: list) -> list[dict]:
-        out = []
-        for cid in ids:
-            c = champs.get(cid) if isinstance(champs, dict) else None
-            if c is not None or cid in index:
-                out.append({"cid": cid,
-                            "name": getattr(c, "name", f"#{cid}"),
-                            "icon": getattr(c, "icon", "")})
-        return out
-
-    # топ банов по мете: средний бан-рейт врагов против мейнов пула
-    ban_rates = cache.opponent_ban_rates()
-    top_ids = [cid for cid, _ in sorted(ban_rates.items(),
-                                        key=lambda kv: -kv[1])[:3]]
-    meta_bans = []
-    for cid in top_ids:
-        meta_bans.append({"cid": cid,
-                          "name": getattr(champs.get(cid), "name",
-                                          f"#{cid}"),
-                          "icon": getattr(champs.get(cid), "icon", ""),
-                          "value": round(ban_rates[cid], 1)})
-
-    personal = cache.player_losses(role)
-    personal_bans = []
-    for row in personal[:3]:
-        c = champs.get(row["opp_id"]) if isinstance(champs, dict) else None
-        personal_bans.append({
-            "cid": row["opp_id"],
-            "name": getattr(c, "name", f"#{row['opp_id']}"),
-            "icon": getattr(c, "icon", ""),
-            "value": row["losses"], "games": row["games"]})
-
+    by_name = {getattr(c, "name", "").lower(): cid
+               for cid, c in (champs.items() if isinstance(champs, dict)
+                              else [])}
     item_names = cache.item_names()
     patch = cache.get_state("patch") or "latest"
 
     def item_url(iid) -> str:
         return DD_ITEM.format(v=patch, i=iid) if iid else ""
 
-    meta_items = [{"item_id": i["item_id"], "name": i["name"],
-                   "value": i["games"], "url": item_url(i["item_id"])}
-                  for i in cache.pool_common_items(cids, role, limit=3)]
-    p_items = cache.pool_personal_items(cids, role, limit=3)
-    personal_items = [{"item_id": i["item_id"],
-                       "name": item_names.get(i["item_id"], ""),
-                       "value": i["games"],
-                       "url": item_url(i["item_id"])} for i in p_items]
-    return {"role": role, "mains": mains, "meta_bans": meta_bans,
-            "personal_bans": personal_bans, "meta_items": meta_items,
-            "personal_items": personal_items, "patch": patch}
+    def champ_row(cid: int) -> dict:
+        c = champs.get(cid) if isinstance(champs, dict) else None
+        name = getattr(c, "name", f"#{cid}")
+        icon = getattr(c, "icon", "")
+
+        # --- баны мои: против кого я проигрываю на этом чемпионе ---
+        mine = cache.player_losses(role, cid=cid)
+        mine_bans = []
+        for row in mine[:3]:
+            o = champs.get(row["opp_id"]) if isinstance(champs, dict) \
+                else None
+            mine_bans.append({
+                "cid": row["opp_id"],
+                "name": getattr(o, "name", f"#{row['opp_id']}"),
+                "icon": getattr(o, "icon", ""),
+                "value": row["losses"], "games": row["games"],
+                "loss_rate": round(row["loss_rate"] * 100)})
+
+        # --- баны общие: кто мете бьёт этого чемпиона ---
+        mu = cache.matchups(cid) or {}
+        rivals = []
+        if mu:
+            by_rate = sorted(mu.items(),
+                             key=lambda kv: kv[1].get("win_rate")
+                             if kv[1].get("win_rate") is not None else 99)
+            for opp_id, d in by_rate[:3]:
+                wr = d.get("win_rate")
+                if wr is None:
+                    continue
+                o = champs.get(opp_id) if isinstance(champs, dict) else None
+                rivals.append({
+                    "cid": opp_id,
+                    "name": getattr(o, "name", f"#{opp_id}"),
+                    "icon": getattr(o, "icon", ""),
+                    "value": round(100 - wr)})
+            rivals.sort(key=lambda r: -r["value"])
+
+        # --- предметы ---
+        my_items = cache.player_items(cid, role, limit=3, big_only=True)
+        my_boots = cache.player_boots(cid, role)
+        his_items = cache.rival_items(cid, role, limit=3)
+        his_boots = cache.rival_boots(cid, role)
+        rune = cache.rune(cid, role)
+
+        return {"cid": cid, "name": name, "icon": icon,
+                "mine_bans": mine_bans, "rival_bans": rivals,
+                "mine_items": [{"item_id": i["item_id"],
+                                "name": item_names.get(i["item_id"], ""),
+                                "games": i["cnt"],
+                                "url": item_url(i["item_id"])}
+                               for i in my_items],
+                "mine_boots": ({"item_id": my_boots["item_id"],
+                                "name": item_names.get(my_boots["item_id"],
+                                                       ""),
+                                "url": item_url(my_boots["item_id"])}
+                               if my_boots else None),
+                "rival_items": [{"item_id": i["item_id"],
+                                 "name": i.get("name") or
+                                 item_names.get(i["item_id"], ""),
+                                 "win_rate": i.get("win_rate") or 0,
+                                 "url": item_url(i["item_id"])}
+                                for i in his_items],
+                "rival_boots": ({"item_id": his_boots["item_id"],
+                                 "name": his_boots.get("name", ""),
+                                 "url": item_url(his_boots["item_id"])}
+                                if his_boots else None),
+                "rune": rune}
+
+    mains: list[dict] = []
+    for name in pool_names[:4]:
+        cid = by_name.get(str(name).lower())
+        if cid is not None:
+            mains.append(champ_row(cid))
+    return {"role": role, "mains": mains, "patch": patch}
 
 
 def render_header(draft, config, n, role: str = "") -> str:

@@ -1760,7 +1760,8 @@ def test_run_ui_startup() -> None:
                       "клиент" in w.cget("text")
                       for w in ov.body.winfo_children()
                       if w.winfo_class() == "Label"),
-              str([w.cget("text") for w in ov.body.winfo_children()]))
+              str([w.cget("text") for w in ov.body.winfo_children()
+                      if w.winfo_class() == "Label"]))
         ov.on_refresh()          # не должно бросать
         check("run_ui: on_refresh безопасен", True)
     finally:
@@ -1821,64 +1822,90 @@ def test_ugg_region_alias_euw1() -> None:
           str(cfg.accounts))
 
 
-def test_pre_draft_summary_pool_and_personal() -> None:
-    """1.3.3: до драфта в оверлее есть сводка по пулу (мета + моя)."""
+def test_pre_draft_summary_per_champion_blocks() -> None:
+    """1.3.4: сводка до драфта — до 4 мейнов, у каждого 3 строки напротив."""
     import draft.main as m
     from draft.cache import Cache
     from draft.settings import load_config
     from draft import champions as ch_mod
 
     tmp = Path(tempfile.gettempdir()) / "opencode"
-    p = tmp / "predraft_130.json"
-    p.write_text(json.dumps({"pool": ["Shen", "Vi"], "role": "support",
-                            "pools": {"support": ["Shen", "Vi"]}},
-                           ensure_ascii=False), encoding="utf-8")
+    p = tmp / "predraft_134.json"
+    pool = ["Shen", "Vi", "Nautilus", "Swain"]
+    p.write_text(json.dumps({"pool": pool, "role": "support",
+                             "pools": {"support": pool},
+                             "accounts": [{"region": "ru", "name": "A",
+                                           "tag": "ru1"}]},
+                            ensure_ascii=False), encoding="utf-8")
     cfg = load_config(str(p))
-    dbp = tmp / "predraft_130.db"
+    dbp = tmp / "predraft_134.db"
     if dbp.exists():
         dbp.unlink()
     cache = Cache(dbp)
     champs, _ver = ch_mod.load_champions()
-    index = ch_mod.build_index(champs)
-    shen, vi = ch_mod.resolve("Shen", index), ch_mod.resolve("Vi", index)
-    # мета-билды: у Шена — Celestial, у Ви — Heartsteel; Heartsteel у обоих
-    cache.save_items(shen, "support",
-                     [{"item_id": 3869, "name": "Celestial Opposition",
-                       "win_rate": 52.0, "games": 900}], [], patch="16.20")
-    cache.save_items(vi, "support",
-                     [{"item_id": 3084, "name": "Heartsteel",
-                       "win_rate": 50.0, "games": 800}], [], patch="16.20")
-    # личные: два предмета на Шене + поражение против Люкс (роль support)
-    cache.save_player_items(shen, "support",
-                            [{"item_id": 3364, "cnt": 12},
-                             {"item_id": 3869, "cnt": 3}])
-    row = {"championId": shen, "win": False, "role": 5, "items": [3364],
-           "teamA": [{"championId": shen, "role": 5, "teamId": 100}],
-           "teamB": [{"championId": 99, "role": 5, "teamId": 200}]}
-    cache.save_player_matches({"region": "ru", "name": "A", "tag": "ru1"},
-                              [row] * 3)
+    idx = ch_mod.build_index(champs)
+    cids = {n: ch_mod.resolve(n, idx) for n in pool}
+    rows_all = []
+    for name, cid in cids.items():
+        cache.save_items(cid, "support",
+                         [{"item_id": 3869, "name": "Celestial Opposition",
+                           "win_rate": 53.0, "games": 900},
+                          {"item_id": 3084, "name": "Heartsteel",
+                           "win_rate": 51.0, "games": 700}],
+                         [{"item_id": 3111, "name": "Mercury's Treads",
+                           "win_rate": 99.0}], patch="16.20")
+        cache.save_player_items(
+            cid, "support", [{"item_id": 3340, "cnt": 5},   # тринкет
+                             {"item_id": 3869, "cnt": 12},
+                             {"item_id": 3111, "cnt": 9},   # ботинки
+                             {"item_id": 3084, "cnt": 6}])
+        cache.save_rune(cid, "support",
+                        {"rune_id": 8437, "name": "Grasp of the Undying",
+                         "url": "https://cdn5.lolalytics.com/rune68/8437.webp"})
+        cache.save_matchups(cid, {266: {"win_rate": 45.0},
+                                  238: {"win_rate": 48.0}})
+        row = {"championId": cid, "win": False, "role": 5,
+               "items": [3869],
+               "teamA": [{"championId": cid, "role": 5, "teamId": 100}],
+               "teamB": [{"championId": 99, "role": 5, "teamId": 200}]}
+        rows_all.extend([row] * 4 + [dict(row, win=True)])
+    acc = {"region": "ru", "name": "A", "tag": "ru1"}
+    cache.save_account(acc)
+    cache.save_player_matches(acc, rows_all)
 
     summ = m.pre_draft_summary(cache, cfg, "support", champs)
-    check("1.3.3: мейны в сводке", [x["name"] for x in summ["mains"]] ==
-          ["Shen", "Vi"], str(summ.get("mains")))
-    # самый частый предмет пула — Heartsteel и Celestial с равным числом
-    # чемпионов; у Шена два core-слота не может быть — один путь
-    meta = {i["item_id"]: i["value"] for i in summ["meta_items"]}
-    check("1.3.3: мета-предметы пула собраны",
-          meta.get(3869) == 1 and meta.get(3084) == 1, str(summ["meta_items"]))
-    pers = {i["item_id"]: i["value"] for i in summ["personal_items"]}
-    check("1.3.3: личные предметы пула собраны", pers.get(3364) == 12,
-          str(summ["personal_items"]))
-    pb = summ["personal_bans"]
-    check("1.3.3: личный проигрыш виден до драфта",
-          pb and pb[0]["cid"] == 99 and pb[0]["value"] == 3, str(pb))
-    # без пула сводки нет — блок не рисуется
-    empty = cfg.pool_for("mid")
-    p2 = tmp / "predraft_130b.json"
+    check("1.3.4: не больше 4 мейнов в сводке",
+          len(summ["mains"]) == 4, str(len(summ["mains"])))
+    first = summ["mains"][0]
+    check("1.3.4: мои баны по чемпиону",
+          [b["cid"] for b in first["mine_bans"]] == [99]
+          and first["mine_bans"][0]["value"] == 4,
+          str(first["mine_bans"]))
+    check("1.3.4: общие баны — кто бьёт чемпиона",
+          [(b["cid"], b["value"]) for b in first["rival_bans"]] ==
+          [(266, 55), (238, 52)], str(first["rival_bans"]))
+    # тринкет и ботинки из топа больших предметов исключены
+    check("1.3.4: мои предметы — только большие",
+          [i["item_id"] for i in first["mine_items"]] == [3869, 3084],
+          str(first["mine_items"]))
+    check("1.3.4: мои ботинки отдельно",
+          first["mine_boots"] and first["mine_boots"]["item_id"] == 3111,
+          str(first["mine_boots"]))
+    check("1.3.4: общие предметы по винрейту",
+          [i["win_rate"] for i in first["rival_items"]] == [53.0, 51.0],
+          str(first["rival_items"]))
+    check("1.3.4: общие ботинки",
+          first["rival_boots"] and first["rival_boots"]["item_id"] == 3111,
+          str(first["rival_boots"]))
+    check("1.3.4: руна чемпиона по линии",
+          first["rune"] and first["rune"]["rune_id"] == 8437,
+          str(first["rune"]))
+    # пустой пул — блока нет
+    p2 = tmp / "predraft_134b.json"
     p2.write_text(json.dumps({"pools": {}}), encoding="utf-8")
-    cfg2 = load_config(str(p2))
-    check("1.3.3: без пула сводка пустая",
-          m.pre_draft_summary(cache, cfg2, "mid", champs) == {})
+    check("1.3.4: без пула сводка пустая",
+          m.pre_draft_summary(cache, load_config(str(p2)), "mid", champs)
+          == {})
     cache.close()
 
 
@@ -1941,11 +1968,11 @@ def test_ugg_personal_aggregation() -> None:
     ]
     agg = ugg.aggregate_losses(rows)
     check("1.3: проигрыш vs Yone в роли top",
-          agg.get((1, 777), {}).get("losses") == 1
-          and agg.get((1, 777), {}).get("games") == 1,
+          agg.get((98, 1, 777), {}).get("losses") == 1
+          and agg.get((98, 1, 777), {}).get("games") == 1,
           str(agg))
     check("1.3: победа в лесу не идёт в проигрыши",
-          agg.get((2, 122), {}).get("losses") == 0, str(agg))
+          agg.get((98, 2, 122), {}).get("losses") == 0, str(agg))
 
     pit = ugg.personal_items(rows)
     check("1.3: личные предметы только из побед",

@@ -26,6 +26,14 @@ LANES = {"top": "top", "jungle": "jungle", "mid": "middle", "adc": "bottom",
 _SECTION_RE = re.compile(r"<!--t=[a-z0-9]+-->([^<]{2,40})<!---->")
 _ITEM_RE = re.compile(
     r'item64/(\d+)\.webp.*?alt="([^"]+)"', re.S)
+_RUNE_RE = re.compile(
+    r'rune68/(\d+)\.webp[^>]*?alt="([^"]+)"', re.S)
+
+# секция рун вынесена отдельно: кеystone — та руна, что показана яркой
+# (без grayscale): вокруг неё — серые альтернативы.
+_RUNE_IMG = re.compile(
+    r'<img srcset="https://cdn5\.lolalytics\.com/rune68/(\d+)\.webp.*?'
+    r'alt="([^"]+)"([^>]*)>', re.S)
 
 # Реальные заголовки разделов страницы билда. Между ними попадаются
 # проценты винрейта секций (те же qv-маркеры) — по ним резать нельзя,
@@ -33,6 +41,41 @@ _ITEM_RE = re.compile(
 _SECTIONS = ("starting items", "core build", "item 4", "item 5",
              "item 6", "boots", "full build", "sell order",
              "starter alternatives", "situational items")
+
+
+def fetch_runes(name: str, lane: str, slug_candidates) -> dict:
+    """Главная руна (keystone) чемпиона на линии — с билд-страницы.
+
+    В секции Primary Runes первая яркая иконка (без grayscale) — та руна,
+    на которой чаще всего играют; остальные — приглушённые альтернативы.
+    Берём яркую: «основная одна большая».
+    """
+    lane_key = LANES.get(lane, lane)
+    last_err = "неизвестно"
+    for slug in slug_candidates(name):
+        try:
+            page = net.get_html(BUILD_URL.format(slug=slug, lane=lane_key),
+                                timeout=30)
+        except net.NetError as e:
+            last_err = str(e)
+            continue
+        i = page.find("Primary Runes")
+        if i < 0:
+            last_err = "секции рун нет"
+            continue
+        j = page.find("Secondary", i)
+        if j < 0:
+            j = i + 4000
+        seg = page[i:j]
+        for m in _RUNE_IMG.finditer(seg):
+            rid, name_r, rest = int(m.group(1)), m.group(2), m.group(3)
+            if "grayscale" in rest:
+                continue
+            return {"rune_id": rid, "name": name_r,
+                    "url":
+                        f"https://cdn5.lolalytics.com/rune68/{rid}.webp"}
+        last_err = "главная руна не разобрана"
+    raise LolalyticsError(f"{name}/{lane}: {last_err}")
 
 # имена секций, из которых собираем билд
 _WANTED = ("starting items", "core build")

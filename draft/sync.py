@@ -353,4 +353,14 @@ def sync_personal(config: Config, cache: Cache, *, progress=None,
             cache.save_meta_items(cid, role, build["core"], build["patch"])
             ok.append(f"{name}: билд {role}")
             time.sleep(0.3)
+        # главная руна по линии — «одна большая», к предметам липнет
+        if cache.rune(cid, role) is None:
+            try:
+                rune = lolalytics.fetch_runes(name, role,
+                                              opgg.slug_candidates)
+                cache.save_rune(cid, role, rune)
+                ok.append(f"{name}: руна {rune['name']}")
+            except Exception as e:                   # noqa: BLE001
+                failed.append(f"{name}: руна lolalytics: {e}")
+            time.sleep(0.3)
     return ok, failed

@@ -89,11 +89,12 @@ CREATE TABLE IF NOT EXISTS player_accounts (
 );
 CREATE TABLE IF NOT EXISTS player_matchup (
     acc_key TEXT NOT NULL,
+    my_champ INTEGER NOT NULL DEFAULT 0,
     role TEXT NOT NULL,
     opp_id INTEGER NOT NULL,
     games INTEGER NOT NULL,
     losses INTEGER NOT NULL,
-    PRIMARY KEY (acc_key, role, opp_id)
+    PRIMARY KEY (acc_key, my_champ, role, opp_id)
 );
 CREATE TABLE IF NOT EXISTS player_items (
     cid INTEGER NOT NULL,
@@ -106,6 +107,16 @@ CREATE TABLE IF NOT EXISTS player_champ (
     cid INTEGER PRIMARY KEY,
     games INTEGER DEFAULT 0,
     wins INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS runes (
+    cid INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    rune_id INTEGER NOT NULL,
+    name TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    updated_at REAL,
+    PRIMARY KEY (cid, role)
 );
 """
 
@@ -148,6 +159,18 @@ class Cache:
                     "INSERT INTO slugs (cid, slug, counter_role) "
                     "SELECT cid, slug, NULL FROM slugs_old")
                 self.conn.execute("DROP TABLE slugs_old")
+        except sqlite3.Error:
+            pass
+        # 1.3.4: player_matchup стал по-чемпионским (my_champ). Старые базы
+        # без колонки переживут миграцию: миграция добавляет столбец с
+        # дефолтом 0, старые строки продолжают работать в агрегате по роли.
+        try:
+            info = {r["name"] for r in
+                    self.conn.execute("PRAGMA table_info(player_matchup)")}
+            if info and "my_champ" not in info:
+                self.conn.execute(
+                    "ALTER TABLE player_matchup "
+                    "ADD COLUMN my_champ INTEGER NOT NULL DEFAULT 0")
         except sqlite3.Error:
             pass
 
@@ -364,18 +387,20 @@ class Cache:
             self.conn.commit()
 
     def save_player_matches(self, acc: dict, rows: list) -> None:
-        """Агрегирует матчи аккаунта в личные проигрыши по роли."""
+        """Агрегирует матчи аккаунта в личные проигрыши (по чемпиону и роли)."""
         from . import ugg
         key = _acc_key(acc["region"], acc["name"], acc["tag"])
         agg = ugg.aggregate_losses(rows)
         with self._lock:
             self.conn.execute("DELETE FROM player_matchup WHERE acc_key=?",
                               (key,))
-            for (ugg_role, opp_id), v in agg.items():
+            for (my_champ, ugg_role, opp_id), v in agg.items():
                 self.conn.execute(
                     "INSERT OR REPLACE INTO player_matchup "
-                    "(acc_key, role, opp_id, games, losses) VALUES (?,?,?,?,?)",
-                    (key, ugg.UGG_TO_ROLE.get(ugg_role, "any"),
+                    "(acc_key, my_champ, role, opp_id, games, losses) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (key, my_champ,
+                     ugg.UGG_TO_ROLE.get(ugg_role, "any"),
                      opp_id, v["games"], v["losses"]))
             self.conn.execute(
                 "UPDATE player_accounts SET games=?, updated_at=? "
@@ -384,21 +409,134 @@ class Cache:
                  acc.get("name", ""), acc.get("tag", "")))
             self.conn.commit()
 
-    def player_losses(self, role: str = "") -> list[dict]:
-        """Кто чаще всего бьёт игрока: [{opp_id, games, losses}]."""
+    def player_losses(self, role: str = "",
+                      cid: int = 0) -> list[dict]:
+        """Кто чаще всего бьёт игрока: [{opp_id, games, losses}].
+
+        role — роль моей линии; cid — если нужна картинка «с кем я проигрываю
+        на конкретном чемпионе» (до драфта, по каждому мейну). Без cid —
+        агрегат по всем моим чемпионам роли.
+        """
         sql = ("SELECT opp_id, SUM(games) g, SUM(losses) l FROM player_matchup")
-        args: tuple = ()
+        cond, args = [], []
+        if cid:
+            cond.append("my_champ=?")
+            args.append(cid)
         if role:
-            # личная статистика роли + то, что набрано без роли
-            sql += " WHERE role IN (?,?)"
-            args = (role, "any")
-        sql += " GROUP BY opp_id HAVING l > 0 ORDER BY l DESC, g DESC"
+            cond.append("role IN (?,?)")
+            args.extend([role, "any"])
+        if cond:
+            sql += " WHERE " + " AND ".join(cond)
+        sql += (" GROUP BY opp_id HAVING l > 0 "
+                "ORDER BY l DESC, g DESC")
         out = []
         for r in self.conn.execute(sql, args).fetchall():
             out.append({"opp_id": r["opp_id"], "games": r["g"],
                         "losses": r["l"],
                         "loss_rate": (r["l"] / r["g"]) if r["g"] else 0.0})
         return out
+
+    # --- большие предметы и ботинки ---
+    # «Большой предмет» — завершённый (legendary/mythic): id от 2400 и выше.
+    # Тринкеты (3340-3365), расходники и ботинки исключаем: ботинки —
+    # отдельная строка в сводке, а не один из трёх «больших».
+    TRINKET_IDS = range(3340, 3366)
+    BOOTS_IDS = {3001, 3006, 3009, 3020, 3047, 3111, 3158, 3117, 3001,
+                 2422, 3170}
+
+    @classmethod
+    def is_big_item(cls, item_id: int) -> bool:
+        return bool(item_id) and 2400 <= item_id <= 9999 \
+            and item_id not in cls.TRINKET_IDS \
+            and item_id not in cls.BOOTS_IDS
+
+    @classmethod
+    def is_boots(cls, item_id: int) -> bool:
+        return item_id in cls.BOOTS_IDS
+
+    def player_items(self, cid: int, role: str, limit: int = 3,
+                     big_only: bool = False) -> list[dict]:
+        """Мои предметы по чемпиону и роли.
+
+        big_only — только завершённые предметы (без зелий/вардов/тринкетов):
+        ровно те «большие», которые просили в сводке.
+        """
+        rows = self.conn.execute(
+            "SELECT item_id, cnt FROM player_items WHERE cid=? AND role IN (?,?) "
+            "ORDER BY cnt DESC LIMIT 60", (cid, role, "any")).fetchall()
+        out = []
+        for r in rows:
+            if big_only and not self.is_big_item(r["item_id"]):
+                continue
+            out.append({"item_id": r["item_id"], "cnt": r["cnt"]})
+            if len(out) >= limit:
+                break
+        return out
+
+    def player_boots(self, cid: int, role: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT item_id, SUM(cnt) n FROM player_items "
+            "WHERE cid=? AND role IN (?,?) GROUP BY item_id "
+            "ORDER BY n DESC LIMIT 12", (cid, role, "any")).fetchall()
+        for r in row:
+            if self.is_boots(r["item_id"]):
+                return {"item_id": r["item_id"], "cnt": r["n"]}
+        return None
+
+    def rival_items(self, cid: int, role: str, limit: int = 3
+                    ) -> list[dict]:
+        """Общие (мета) предметы чемпиона на роли, отсортированные по
+        винрейту: отвечают на вопрос «что оптимально», а не «что я ношу»."""
+        rows = self.conn.execute(
+            "SELECT slot, item_id, name, win_rate, games FROM item_builds "
+            "WHERE cid=? AND role=? AND slot>0 ORDER BY slot",
+            (cid, role)).fetchall()
+        out = [dict(r) for r in rows]
+        if not out:
+            for alt in self.item_roles(cid):
+                rows = self.conn.execute(
+                    "SELECT slot, item_id, name, win_rate, games "
+                    "FROM item_builds WHERE cid=? AND role=? AND slot>0 "
+                    "ORDER BY slot", (cid, alt)).fetchall()
+                if rows:
+                    out = [dict(r) for r in rows]
+                    break
+        meta = self.meta_items(cid, role, limit=limit)
+        ids = {r["item_id"] for r in out}
+        for m in meta:
+            if m["item_id"] not in ids:
+                out.append({"item_id": m["item_id"], "name": m.get("name"),
+                            "win_rate": 0.0, "games": 0.0})
+        # мету, у которой нет винрейта (lolalytics), валит в конец
+        out = [r for r in out if self.is_big_item(r.get("item_id", 0))]
+        out.sort(key=lambda r: -(r.get("win_rate") or 0))
+        return out[:limit]
+
+    def rival_boots(self, cid: int, role: str) -> dict | None:
+        return self.boots(cid, role)
+
+    # ---------- руны ----------
+    def save_rune(self, cid: int, role: str, rune: dict,
+                  source: str = "lolalytics") -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO runes (cid, role, rune_id, name, "
+                "url, source, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (cid, role, rune.get("rune_id", 0), rune.get("name", ""),
+                 rune.get("url", ""), source, time.time()))
+            self.conn.commit()
+
+    def rune(self, cid: int, role: str) -> dict | None:
+        r = self.conn.execute(
+            "SELECT rune_id, name, url, source FROM runes "
+            "WHERE cid=? AND role=?", (cid, role)).fetchone()
+        if r:
+            return dict(r)
+        # роль не совпала — берём ближайшую соседнюю, молчать хуже
+        r = self.conn.execute(
+            "SELECT rune_id, name, url, source FROM runes "
+            "WHERE cid=? LIMIT 1", (cid,)).fetchone()
+        return dict(r) if r else None
 
     def save_player_items(self, cid: int, role: str, items: list) -> None:
         with self._lock:
@@ -409,14 +547,6 @@ class Cache:
                 "VALUES (?,?,?,?)",
                 [(cid, role, i["item_id"], i["cnt"]) for i in items])
             self.conn.commit()
-
-    def player_items(self, cid: int, role: str, limit: int = 3) -> list[dict]:
-        out = []
-        for r in self.conn.execute(
-                "SELECT item_id, cnt FROM player_items WHERE cid=? AND role=? "
-                "ORDER BY cnt DESC LIMIT ?", (cid, role, limit)):
-            out.append(dict(r))
-        return out
 
     def save_player_champ(self, stats: list) -> None:
         """Сводка по чемпионам игрока: сколько игр и побед суммарно."""
