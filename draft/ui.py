@@ -451,6 +451,7 @@ class DraftOverlay:
         # нечитаем — непонятно, читаем ли мы вообще правильный состав.
         self._render_status(extra)
         self._render_role(extra)
+        self._render_pre_draft(extra)
         self._render_board(extra)
         self._render_bans(extra)
         self._render_ban_advice(extra)
@@ -603,6 +604,81 @@ class DraftOverlay:
                                                           self._wrap() - 60),
                      justify="left").pack(side="left", fill="x",
                                           expand=True)
+
+    def _render_pre_draft(self, extra) -> None:
+        """Пока драфт не начался: мейны + усреднённая сводка.
+
+        До драфта situational-советы ещё нечем наполнять (составов нет),
+        но общая картина по пулу полезна всегда: кого баню на своей позиции
+        по мете и что вообще собирать на мейнах. Всё рядом с иконками
+        персонажей, чтобы не приходилось складывать по строкам.
+
+        Как только начинается настоящий драфт, extra больше не несёт "pre" —
+        блок исзает, уступая место доске ролей и советам.
+        """
+        pre = extra.get("pre")
+        if not pre or not pre.get("mains"):
+            return
+        box = tk.Frame(self.body, bg=BG)
+        box.pack(fill="x", pady=(0, 4))
+
+        # мейны с иконками
+        row = tk.Frame(box, bg=BG)
+        row.pack(fill="x")
+        tk.Label(row, text="мейны", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        for m in pre["mains"]:
+            photo = self.icons.photo(f"pm{m['cid']}", m.get("icon") or "",
+                                     size=20) if m.get("icon") else None
+            if photo is not None:
+                tk.Label(row, image=photo, bg=BG).pack(side="left",
+                                                       padx=(4, 0))
+            tk.Label(row, text=m.get("name", ""), bg=BG, fg=FG,
+                     font=("Segoe UI", 8)).pack(side="left", padx=(2, 6))
+
+        def line(label: str, tag: str, rows_list: list, fg, unit: str,
+                 item: bool = False) -> None:
+            if not rows_list:
+                return
+            r = tk.Frame(box, bg=BG)
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=f"{label} ▸", bg=BG, fg=tag,
+                     font=("Segoe UI", 8, "bold")).pack(side="left",
+                                                        padx=(4, 0))
+            first = True
+            for x in rows_list:
+                if not first:
+                    tk.Label(r, text="·", bg=BG, fg=MUTED,
+                             font=("Segoe UI", 8)).pack(side="left", padx=4)
+                if item:
+                    photo = (self.icons.photo(f"pi{x['item_id']}",
+                                              x.get("url") or "", size=18)
+                             if x.get("url") else None)
+                else:
+                    photo = (self.icons.photo(f"pb{x['cid']}",
+                                              x.get("icon") or "", size=18)
+                             if x.get("icon") else None)
+                if photo is not None:
+                    tk.Label(r, image=photo, bg=BG).pack(side="left")
+                else:
+                    tk.Label(r, text="•", bg=BG, fg=MUTED,
+                             font=("Segoe UI", 9)).pack(side="left")
+                tk.Label(r, text=x.get("name", ""), bg=BG, fg=fg,
+                         font=("Segoe UI", 8)).pack(side="left", padx=(3, 0))
+                val = x.get("value")
+                if val is not None:
+                    tk.Label(r, text=f"{val}{unit}", bg=BG, fg=MUTED,
+                             font=("Segoe UI", 7)).pack(side="left",
+                                                        padx=(2, 0))
+                first = False
+
+        line("банить (мета)", ACCENT, pre.get("meta_bans") or [], FG, "%")
+        line("мои проигрыши", TONE_HIGH,
+             pre.get("personal_bans") or [], FG, " п.", )
+        line("сборки (мета)", MUTED, pre.get("meta_items") or [], FG,
+             " игр", item=True)
+        line("мои сборки", TONE_HIGH, pre.get("personal_items") or [],
+             FG, " игр", item=True)
 
     def _render_ban_advice(self, extra) -> None:
         """Кого банить на своей позиции.

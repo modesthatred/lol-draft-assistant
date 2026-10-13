@@ -511,6 +511,53 @@ class Cache:
             return True
         return bool(patch) and bool(r["patch"]) and r["patch"] != patch
 
+    # ---------- 1.3: пре-драфт сводка по пулу ----------
+    def pool_common_items(self, cids, role: str, limit: int = 3) -> list[dict]:
+        """Самые частые предметы билдов пула — «усреднённый» билд.
+
+        До начала драфта показываем, что вообще собирать на мейнах: берём
+        core-слоты всех чемпионов пула (роль primero, затем любые роли) и
+        считаем, какой предмет встречается чаще. Это не персональная
+        статистика, а мета по пулу — для любого драфта одинаковая.
+        """
+        ids = [c for c in cids]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT item_id, name, COUNT(*) n FROM item_builds "
+            f"WHERE cid IN ({marks}) AND slot>0 AND role IN (?,?) "
+            f"GROUP BY item_id ORDER BY n DESC LIMIT ?",
+            (*ids, role, "any", limit)).fetchall()
+        if not rows:
+            rows = self.conn.execute(
+                f"SELECT item_id, name, COUNT(*) n FROM item_builds "
+                f"WHERE cid IN ({marks}) AND slot>0 "
+                f"GROUP BY item_id ORDER BY n DESC LIMIT ?",
+                (*ids, limit)).fetchall()
+        return [{"item_id": r["item_id"], "name": r["name"],
+                 "games": r["n"]} for r in rows]
+
+    def pool_personal_items(self, cids, role: str,
+                            limit: int = 3) -> list[dict]:
+        """Мои личные предметы по пулу (из победных игр всех аккаунтов)."""
+        ids = [c for c in cids]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT item_id, SUM(cnt) n FROM player_items "
+            f"WHERE cid IN ({marks}) AND role IN (?,?) "
+            f"GROUP BY item_id ORDER BY n DESC LIMIT ?",
+            (*ids, role, "any", limit)).fetchall()
+        if not rows:
+            rows = self.conn.execute(
+                f"SELECT item_id, SUM(cnt) n FROM player_items "
+                f"WHERE cid IN ({marks}) "
+                f"GROUP BY item_id ORDER BY n DESC LIMIT ?",
+                (*ids, limit)).fetchall()
+        return [{"item_id": r["item_id"], "games": r["n"]} for r in rows]
+
     # ---------- общее состояние (номер патча и пр.) ----------
     def set_state(self, key: str, value: str) -> None:
         with self._lock:

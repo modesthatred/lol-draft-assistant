@@ -43,6 +43,30 @@ TXT_BG = "#1b1f2a"
 # кандидаты считаются по одной и той же формуле, просто их больше.
 MAX_POOL = 12
 
+
+def attach_entry_menu(entry) -> None:
+    """Правый клик по полю ввода: Копировать / Вставить / Вырезать.
+
+    Windows-Tk не даёт Entry своего контекстного меню, а вставка привычным
+    правым кликом — то, чего пользователь ждёт от любого поля. Ctrl+V при
+    этом продолжает работать.
+    """
+    menu = tk.Menu(entry, tearoff=0, bg=TXT_BG, fg=FG)
+    menu.add_command(label="Вырезать",
+                     command=lambda: entry.event_generate("<<Cut>>"))
+    menu.add_command(label="Копировать",
+                     command=lambda: entry.event_generate("<<Copy>>"))
+    menu.add_command(label="Вставить",
+                     command=lambda: entry.event_generate("<<Paste>>"))
+
+    def show(evt):
+        try:
+            menu.tk_popup(evt.x_root, evt.y_root)
+        finally:
+            menu.grab_release()
+
+    entry.bind("<Button-3>", show)
+
 # Источники данных: подпись в настройках -> ключ в конфиге.
 SOURCES = [
     ("op.gg — контрпики, синергии, билды предметов", "opgg"),
@@ -212,6 +236,7 @@ class SettingsWindow:
         ent = tk.Entry(self.body, textvariable=self.search, bg=TXT_BG, fg=FG,
                        insertbackground=FG, font=("Segoe UI", 10),
                        relief="flat")
+        attach_entry_menu(ent)
         ent.pack(fill="x", padx=14, pady=(4, 6))
 
         mid = tk.Frame(self.body, bg=BG)
@@ -307,10 +332,12 @@ class SettingsWindow:
             name = tk.Entry(entry, width=22, bg=TXT_BG, fg=FG,
                             insertbackground=FG, font=("Segoe UI", 9),
                             relief="flat")
+            attach_entry_menu(name)
             name.pack(side="left", padx=(4, 4))
             tag = tk.Entry(entry, width=8, bg=TXT_BG, fg=FG,
                            insertbackground=FG, font=("Segoe UI", 9),
                            relief="flat")
+            attach_entry_menu(tag)
             tag.pack(side="left")
             chk = tk.Label(entry, text="✓", bg=TXT_BG, fg=MUTED,
                            cursor="hand2", font=("Segoe UI", 10, "bold"),
@@ -422,9 +449,11 @@ class SettingsWindow:
         self.proxy = tk.StringVar(value=self.config.proxy)
         row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=14, pady=(2, 0))
-        tk.Entry(row, textvariable=self.proxy, bg=TXT_BG, fg=FG,
-                 insertbackground=FG, font=("Consolas", 9),
-                 relief="flat").pack(side="left", fill="x", expand=True)
+        proxy_e = tk.Entry(row, textvariable=self.proxy, bg=TXT_BG, fg=FG,
+                           insertbackground=FG, font=("Consolas", 9),
+                           relief="flat")
+        attach_entry_menu(proxy_e)
+        proxy_e.pack(side="left", fill="x", expand=True)
         btn = tk.Label(row, text="Проверить", bg=TXT_BG, fg=FG, cursor="hand2",
                        font=("Segoe UI", 9), padx=8, pady=2)
         btn.pack(side="left", padx=(6, 0))
@@ -508,6 +537,7 @@ class SettingsWindow:
         hk = tk.Entry(self.body, textvariable=self.hotkey, bg=TXT_BG, fg=FG,
                       insertbackground=FG, font=("Consolas", 11), width=10,
                       relief="flat")
+        attach_entry_menu(hk)
         hk.pack(anchor="w", padx=14, pady=(2, 4))
         tk.Label(self.body, text="например F8, F9, Ctrl+F8", bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).pack(anchor="w", padx=14)
@@ -581,9 +611,11 @@ class SettingsWindow:
             value=str(lcu.detect_league_path() or ""))
         row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=14, pady=(2, 2))
-        tk.Entry(row, textvariable=self.league_path, bg=TXT_BG, fg=FG,
-                 insertbackground=FG, font=("Consolas", 9),
-                 relief="flat").pack(side="left", fill="x", expand=True)
+        league_e = tk.Entry(row, textvariable=self.league_path, bg=TXT_BG,
+                             fg=FG, insertbackground=FG,
+                             font=("Consolas", 9), relief="flat")
+        attach_entry_menu(league_e)
+        league_e.pack(side="left", fill="x", expand=True)
 
         def browse():
             d = filedialog.askdirectory(
