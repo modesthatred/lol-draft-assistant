@@ -52,7 +52,9 @@ class SettingsWindow:
         self.top.title("Настройки — LoL Draft Assistant")
         self.top.configure(bg=BG)
         self.top.transient(parent)
-        self.top.resizable(False, False)
+        self.top.resizable(True, True)
+        self.top.geometry("760x680")
+        self.top.minsize(520, 420)
         self.top.grab_set()
 
         self._build()
